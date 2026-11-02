@@ -1,1 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><line x1="32" y1="4" x2="32" y2="14" stroke="#4fc3f7" stroke-width="4"/><circle cx="32" cy="5" r="4" fill="#ff7043"/><rect x="8" y="14" width="48" height="38" rx="10" fill="#4fc3f7"/><rect x="2" y="26" width="6" height="14" rx="3" fill="#0288d1"/><rect x="56" y="26" width="6" height="14" rx="3" fill="#0288d1"/><circle cx="23" cy="30" r="6" fill="#fff"/><circle cx="41" cy="30" r="6" fill="#fff"/><circle cx="23" cy="30" r="3" fill="#263238"/><circle cx="41" cy="30" r="3" fill="#263238"/><rect x="20" y="42" width="24" height="4" rx="2" fill="#263238"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#g)"/>
+  <g fill="#fff">
+    <path d="M840 478 C815 462 790 452 765 448 C760 420 735 385 690 372 C600 340 480 345 400 410 C340 460 300 540 285 620 C255 610 225 600 195 588 C225 615 250 630 268 650 C270 680 262 712 245 742 C280 715 300 680 312 650 C345 585 415 510 505 482 C585 458 655 468 705 488 C745 505 795 500 840 478 Z"/>
+    <path d="M575 348 C555 300 520 270 470 255 C485 290 485 325 470 365 Z"/>
+    <path d="M560 470 C560 520 540 555 505 580 C565 575 610 535 630 478 Z"/>
+  </g>
+  <circle cx="712" cy="418" r="15" fill="#1e40af"/>
+  <path d="M300 810 C380 770 460 770 540 810 S700 850 780 810" fill="none" stroke="#fff" stroke-width="44" stroke-linecap="round" opacity="0.85"/>
+</svg>

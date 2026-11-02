@@ -21,5 +21,7 @@ depends = "$auto"
 assets = [
     ["target/release/kolphin", "usr/bin/", "755"],
     ["../assets/kolphin.desktop", "usr/share/applications/", "644"],
-    ["../assets/kolphin.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../assets/icons/kolphin-32.png", "usr/share/icons/hicolor/32x32/apps/kolphin.png", "644"],
+    ["../assets/icons/kolphin-128.png", "usr/share/icons/hicolor/128x128/apps/kolphin.png", "644"],
+    ["../assets/icons/kolphin-256.png", "usr/share/icons/hicolor/256x256@2/apps/kolphin.png", "644"],
 ]
