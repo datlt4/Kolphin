@@ -913,11 +913,17 @@ impl Win {
                     let Some(win) = weak.upgrade() else { return };
                     let w2 = win.weak();
                     let root = m.root().path();
+                    let name = m.name().to_string();
+                    let busy = adw::Toast::builder().title(format!("Unmounting {name}…")).timeout(0).build();
+                    win.toasts.add_toast(busy.clone());
                     devices::eject(win.window.upcast_ref(), m.clone(), move |res| {
+                        busy.dismiss();
                         let Some(win) = w2.upgrade() else { return };
+                        win.fill_places();
                         match res {
                             // Views inside the ejected drive go home instead of showing a vanished folder.
                             Ok(()) => {
+                                win.toasts.add_toast(adw::Toast::new(&format!("Unmounted {name}")));
                                 for pane in win.all_panes() {
                                     if root.as_ref().is_some_and(|r| pane.path().starts_with(r)) {
                                         pane.navigate(glib::home_dir());

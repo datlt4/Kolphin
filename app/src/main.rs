@@ -100,6 +100,7 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .palette row:selected { background: alpha(@accent_color, 0.18); }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
+.trash-bar { margin: 0 12px 6px; padding: 6px 6px 6px 12px; border-radius: 9px; background: @kolphin_elev; border: 1px solid @kolphin_border; }
 .pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }
 .pane-close:hover { background: @kolphin_hover_strong; color: #ffffff; }
 scrollbar { background: transparent; border: none; }
@@ -114,6 +115,13 @@ fn main() -> glib::ExitCode {
     // GTK 4.6's GL renderers drop frames (and take ~1 s to start) on NVIDIA/X11; cairo holds full refresh rate.
     if std::env::var_os("GSK_RENDERER").is_none() {
         std::env::set_var("GSK_RENDERER", "cairo");
+    }
+    // GTK 4.6's ibus module garbles Vietnamese input (Unikey: lost or reversed letters); on X11 the ibus
+    // daemon's XIM bridge types correctly. KOLPHIN_IM_MODULE picks another module explicitly.
+    if let Some(im) = std::env::var_os("KOLPHIN_IM_MODULE") {
+        std::env::set_var("GTK_IM_MODULE", im);
+    } else if std::env::var("GTK_IM_MODULE").as_deref() == Ok("ibus") && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        std::env::set_var("GTK_IM_MODULE", "xim");
     }
     let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
     if cfg!(debug_assertions) || std::env::var_os("KOLPHIN_BENCH").is_some() {

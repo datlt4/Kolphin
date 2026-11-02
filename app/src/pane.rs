@@ -29,6 +29,7 @@ pub struct Pane {
     pub canvas: Canvas,
     /// Shown in split view: closes this side.
     pub close: gtk::Button,
+    trash_bar: gtk::Box,
     vscroll: gtk::Scrollbar,
     hscroll: gtk::Scrollbar,
     status: gtk::Label,
@@ -90,6 +91,12 @@ impl Pane {
         top.append(&pathbar.root);
         top.append(&close);
         root.append(&top);
+        // Shown while the folder is a trash: Empty Trash without hunting in menus.
+        let trash_bar = gtk::Box::builder().spacing(8).css_classes(["trash-bar"]).visible(false).build();
+        trash_bar.append(&gtk::Label::builder().label("Trash").hexpand(true).xalign(0.0).css_classes(["dim-label"]).build());
+        trash_bar.append(&gtk::Button::builder().label("Restore").action_name("win.restore").build());
+        trash_bar.append(&gtk::Button::builder().label("Empty Trash").action_name("win.empty-trash").css_classes(["destructive-action"]).build());
+        root.append(&trash_bar);
         root.append(&filter_bar);
         root.append(&view);
         root.append(&hscroll);
@@ -100,6 +107,7 @@ impl Pane {
             pathbar,
             canvas,
             close,
+            trash_bar,
             vscroll,
             hscroll,
             status,
@@ -452,6 +460,7 @@ impl Pane {
         let show_hidden = self.canvas.model().show_hidden;
         self.canvas.reset(show_hidden);
         self.canvas.set_dir(path.clone());
+        self.trash_bar.set_visible(ops_trash(&path));
         self.filter.set_text("");
         self.filter_bar.set_reveal_child(false);
         self.apply_props(&viewprops::load(&path).unwrap_or_default());
