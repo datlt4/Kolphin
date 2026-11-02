@@ -912,9 +912,19 @@ impl Win {
                 b.connect_clicked(move |_| {
                     let Some(win) = weak.upgrade() else { return };
                     let w2 = win.weak();
+                    let root = m.root().path();
                     devices::eject(win.window.upcast_ref(), m.clone(), move |res| {
-                        if let (Some(win), Err(e)) = (w2.upgrade(), res) {
-                            win.toasts.add_toast(adw::Toast::new(&format!("Eject failed: {e}")));
+                        let Some(win) = w2.upgrade() else { return };
+                        match res {
+                            // Views inside the ejected drive go home instead of showing a vanished folder.
+                            Ok(()) => {
+                                for pane in win.all_panes() {
+                                    if root.as_ref().is_some_and(|r| pane.path().starts_with(r)) {
+                                        pane.navigate(glib::home_dir());
+                                    }
+                                }
+                            }
+                            Err(e) => win.toasts.add_toast(adw::Toast::new(&format!("Eject failed: {e}"))),
                         }
                     });
                 });
@@ -941,7 +951,7 @@ impl Win {
             (glib::UserDirectory::Videos, "folder-videos-symbolic"),
             (glib::UserDirectory::Music, "folder-music-symbolic"),
         ] {
-            if let Some(p) = glib::user_special_dir(dir).filter(|p| p.is_dir() && *p != glib::home_dir()) {
+            if let Some(p) = special_dir(dir) {
                 add(themed(icon), &folder_name(&p), Place::Path(p), None, None);
             }
         }
@@ -1013,6 +1023,25 @@ impl Win {
         add(themed("list-add-symbolic"), "Connect to Server…", Place::Connect, None, None);
         *self.place_paths.borrow_mut() = places.into_inner();
     }
+}
+
+/// An XDG folder (Downloads, …); when user-dirs points it at $HOME, fall back to ~/<English name> if that exists
+/// (a symlink to another drive counts).
+fn special_dir(dir: glib::UserDirectory) -> Option<PathBuf> {
+    let home = glib::home_dir();
+    let p = glib::user_special_dir(dir).filter(|p| p.is_dir() && p.as_path() != home.as_path() && p.as_path() != home.join("").as_path());
+    p.or_else(|| {
+        let name = match dir {
+            glib::UserDirectory::Desktop => "Desktop",
+            glib::UserDirectory::Documents => "Documents",
+            glib::UserDirectory::Downloads => "Downloads",
+            glib::UserDirectory::Pictures => "Pictures",
+            glib::UserDirectory::Videos => "Videos",
+            glib::UserDirectory::Music => "Music",
+            _ => return None,
+        };
+        Some(home.join(name)).filter(|p| p.is_dir())
+    })
 }
 
 /// A sidebar entry and what clicking it does.
