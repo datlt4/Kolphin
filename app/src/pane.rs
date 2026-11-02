@@ -187,6 +187,7 @@ impl Pane {
         let path = self.path();
         let show_hidden = self.canvas.model().show_hidden;
         self.canvas.reset(show_hidden);
+        self.canvas.set_dir(path.clone());
         self.pathbar.set_path(&path);
         self.loading.set(true);
         if let Some(f) = self.on_navigated.borrow().as_ref() {

@@ -32,7 +32,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - Theme tối xanh navy + accent `#5b8cff` giống Kermius/Kellyfin; sidebar có logo + phiên bản.
 - Benchmark: `tools/mkbench.py` tạo thư mục 1 triệu file; `KOLPHIN_BENCH=1` đo thời gian load + thời gian vẽ khi cuộn.
 
-### M2 — Thumbnail
+### M2 — Thumbnail ✅
 - Ảnh + video; hàng đợi ưu tiên vùng đang xem, huỷ khi cuộn qua.
 - Số luồng theo loại ổ (`/sys/block/*/queue/rotational`): HDD 1–2, SSD nhiều.
 - JPEG giải mã thu nhỏ 1/8, ưu tiên thumbnail EXIF; video qua ffmpeg; cache chuẩn freedesktop `~/.cache/thumbnails`.

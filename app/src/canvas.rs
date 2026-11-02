@@ -1,6 +1,7 @@
 //! Virtualized file view: only the visible items are laid out and drawn (Icons / Compact / Details).
 use crate::icons;
 use crate::model::{Model, UNKNOWN_SIZE, UNKNOWN_TIME};
+use crate::thumbs;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, gio, glib, graphene, gsk, pango, prelude::*};
 use std::cell::{Cell, Ref, RefCell};
@@ -68,6 +69,15 @@ struct Text {
     columns: Option<[pango::Layout; 3]>,
 }
 
+enum Thumb {
+    Pending,
+    Ready(u32, gdk::Texture),
+    Failed,
+}
+
+/// Thumbnails kept in memory before off-screen ones are dropped.
+const MAX_THUMBS: usize = 3000;
+
 struct Band {
     start: (f64, f64),
     cur: (f64, f64),
@@ -98,6 +108,12 @@ mod imp {
         pub typeahead: RefCell<(String, Option<Instant>)>,
         pub on_action: RefCell<Option<ActionHandler>>,
         pub draw_ms: RefCell<Option<Vec<f64>>>,
+        pub(super) thumbs: RefCell<HashMap<u32, Thumb>>,
+        pub thumb_gen: Cell<u32>,
+        pub thumb_owner: Cell<u64>,
+        pub thumb_tx: RefCell<Option<thumbs::Sender>>,
+        pub thumb_requested: Cell<bool>,
+        pub dir: RefCell<std::path::PathBuf>,
     }
 
     impl Default for Canvas {
@@ -123,6 +139,12 @@ mod imp {
                 typeahead: Default::default(),
                 on_action: Default::default(),
                 draw_ms: Default::default(),
+                thumbs: Default::default(),
+                thumb_gen: Default::default(),
+                thumb_owner: Default::default(),
+                thumb_tx: Default::default(),
+                thumb_requested: Default::default(),
+                dir: Default::default(),
             }
         }
     }
@@ -227,6 +249,8 @@ impl Canvas {
         self.stop_animation();
         imp.vadj.set_value(0.0);
         imp.hadj.set_value(0.0);
+        imp.thumbs.borrow_mut().clear();
+        imp.thumb_gen.set(imp.thumb_gen.get().wrapping_add(1));
         self.update(|_| {});
     }
 
@@ -455,6 +479,10 @@ impl Canvas {
                 let e = &m.entries[idx as usize];
                 (idx, m.selected[idx as usize], icons::icon_name(&e.name.to_string_lossy(), e.is_dir))
             };
+            let thumb = match imp.thumbs.borrow().get(&idx) {
+                Some(Thumb::Ready(_, tex)) => Some(tex.clone()),
+                _ => None,
+            };
             let (ox, oy) = g.origin(p);
             let (x, y) = (ox - sx, oy - sy);
             let (bx, by, bw, bh, radius) = match self.mode() {
@@ -482,7 +510,15 @@ impl Canvas {
                 ViewMode::Icons => (x + (g.cell_w - g.icon) / 2.0, y + 10.0),
                 _ => (x + 12.0, y + (g.cell_h - g.icon) / 2.0),
             };
-            if let Some(tex) = icons::texture(icon, (g.icon * scale).round() as u32) {
+            if let Some(tex) = thumb {
+                // Fit the preview in the icon box, keeping its aspect ratio.
+                let (tw, th) = (tex.width() as f64, tex.height() as f64);
+                let s = g.icon / tw.max(th);
+                let r = rect(ix + (g.icon - tw * s) / 2.0, iy + (g.icon - th * s) / 2.0, tw * s, th * s);
+                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(r, if g.icon > 40.0 { 6.0 } else { 3.0 }));
+                snap.append_texture(&tex, &r);
+                snap.pop();
+            } else if let Some(tex) = icons::texture(icon, (g.icon * scale).round() as u32) {
                 snap.append_texture(&tex, &rect(ix, iy, g.icon, g.icon));
             }
 
@@ -527,6 +563,8 @@ impl Canvas {
             }
         }
 
+        self.request_thumbs(first.min(len), last.min(len), (g.icon * scale).round() as u32);
+
         if let Some(b) = imp.band.borrow().as_ref() {
             let (x0, y0) = (b.start.0.min(b.cur.0) - sx, b.start.1.min(b.cur.1) - sy);
             let r = rect(x0, y0, (b.start.0 - b.cur.0).abs(), (b.start.1 - b.cur.1).abs());
@@ -537,9 +575,93 @@ impl Canvas {
         snap.pop();
     }
 
+    // ---------- thumbnails ----------
+
+    /// Queue previews for the visible items, then one more screen ahead; replaces the previous request.
+    fn request_thumbs(&self, first: usize, last: usize, px: u32) {
+        let imp = self.imp();
+        let px = px.clamp(16, thumbs::MAX_PX);
+        let ahead = (last + (last - first)).min(self.model().order.len());
+        let gen = imp.thumb_gen.get() as u64;
+        let dir = self.dir();
+        let mut jobs = Vec::new();
+        {
+            let m = self.model();
+            let mut cache = imp.thumbs.borrow_mut();
+            for p in first..ahead {
+                let idx = m.order[p];
+                let e = &m.entries[idx as usize];
+                if e.is_dir || e.mtime == UNKNOWN_TIME {
+                    continue;
+                }
+                match cache.get(&idx) {
+                    Some(Thumb::Ready(have, _)) if *have >= px || *have >= thumbs::MAX_PX => continue,
+                    Some(Thumb::Failed) => continue,
+                    _ => {}
+                }
+                let name = e.name.to_string_lossy();
+                let Some(kind) = thumbs::kind(&name) else { continue };
+                if !matches!(cache.get(&idx), Some(Thumb::Ready(..))) {
+                    cache.insert(idx, Thumb::Pending);
+                }
+                jobs.push(thumbs::Job { key: gen << 32 | idx as u64, path: dir.join(&*e.name), kind, px, mtime: e.mtime });
+            }
+            if cache.len() > MAX_THUMBS {
+                let keep: std::collections::HashSet<u32> = m.order[first.saturating_sub(last - first)..ahead].iter().copied().collect();
+                cache.retain(|k, _| keep.contains(k));
+            }
+        }
+        if jobs.is_empty() && !imp.thumb_requested.get() {
+            return;
+        }
+        imp.thumb_requested.set(!jobs.is_empty());
+        let tx = imp.thumb_tx.borrow().clone();
+        if let Some(tx) = tx {
+            thumbs::request(imp.thumb_owner.get(), jobs, &tx);
+        }
+    }
+
+    fn on_thumb(&self, done: thumbs::Done) {
+        let imp = self.imp();
+        if (done.key >> 32) as u32 != imp.thumb_gen.get() {
+            return;
+        }
+        let idx = done.key as u32;
+        let thumb = match done.image {
+            Some(img) => {
+                let (w, h) = img.dimensions();
+                let bytes = glib::Bytes::from_owned(img.into_raw());
+                Thumb::Ready(done.px, gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &bytes, w as usize * 4).into())
+            }
+            None => Thumb::Failed,
+        };
+        imp.thumbs.borrow_mut().insert(idx, thumb);
+        self.queue_draw();
+    }
+
+    /// Folder whose entries are shown (thumbnail paths are built from it).
+    pub fn set_dir(&self, dir: std::path::PathBuf) {
+        *self.imp().dir.borrow_mut() = dir;
+    }
+
+    fn dir(&self) -> std::path::PathBuf {
+        self.imp().dir.borrow().clone()
+    }
+
     // ---------- input ----------
 
     fn setup(&self) {
+        static OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let (tx, rx) = async_channel::unbounded::<thumbs::Done>();
+        self.imp().thumb_owner.set(OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        *self.imp().thumb_tx.borrow_mut() = Some(tx);
+        let weak = self.downgrade();
+        glib::spawn_future_local(async move {
+            while let Ok(done) = rx.recv().await {
+                let Some(c) = weak.upgrade() else { return };
+                c.on_thumb(done);
+            }
+        });
         self.set_focusable(true);
         self.set_overflow(gtk::Overflow::Hidden);
         self.set_hexpand(true);
