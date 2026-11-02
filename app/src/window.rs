@@ -50,6 +50,8 @@ pub struct Win {
     place_paths: RefCell<Vec<Option<Place>>>,
     /// LAN hosts found by gvfs (name, URI).
     hosts: RefCell<Vec<(String, String)>>,
+    /// (drive label, trash files dir) for the Trash ▾ menu.
+    trashes: RefCell<Vec<(String, PathBuf)>>,
 }
 
 thread_local! {
@@ -196,6 +198,7 @@ impl Win {
             places,
             place_paths: Default::default(),
             hosts: Default::default(),
+            trashes: Default::default(),
         });
         win.setup_actions();
         win.setup_places();
@@ -614,6 +617,16 @@ impl Win {
             let uri = gio::File::for_path(actions::config_file()).uri();
             let _ = gio::AppInfo::launch_default_for_uri(&uri, Some(&WidgetExt::display(&w.window).app_launch_context()));
         });
+        let open_trash = gio::SimpleAction::new("open-trash", Some(glib::VariantTy::INT32));
+        let w = self.weak();
+        open_trash.connect_activate(move |_, v| {
+            let (Some(win), Some(i)) = (w.upgrade(), v.and_then(|v| v.get::<i32>())) else { return };
+            let dir = win.trashes.borrow().get(i as usize).map(|(_, d)| d.clone());
+            if let Some(dir) = dir {
+                win.pane().navigate(dir);
+            }
+        });
+        self.window.add_action(&open_trash);
         let custom = gio::SimpleAction::new("custom-action", Some(glib::VariantTy::INT32));
         let w = self.weak();
         custom.connect_activate(move |_, v| {
@@ -1006,19 +1019,33 @@ impl Win {
         let monitor = gio::VolumeMonitor::get();
         let tops: Vec<(PathBuf, String)> = monitor.mounts().iter().filter_map(|m| Some((m.root().path()?, m.name().to_string()))).collect();
         let dirs = ops::trash_dirs(&tops.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
-        for (i, dir) in dirs.into_iter().enumerate() {
-            let full = std::fs::read_dir(&dir).is_ok_and(|mut r| r.next().is_some());
-            if i > 0 && !full {
-                continue;
+        // One Trash row; other drives' non-empty trashes are in its ▾ menu.
+        let full = |d: &PathBuf| std::fs::read_dir(d).is_ok_and(|mut r| r.next().is_some());
+        let trashes: Vec<(String, PathBuf)> = dirs
+            .iter()
+            .enumerate()
+            .filter(|(i, d)| *i == 0 || full(d))
+            .map(|(i, d)| {
+                let label = if i == 0 { "Home".to_string() } else { tops.iter().find(|(t, _)| d.starts_with(t)).map_or("drive".to_string(), |(_, n)| n.clone()) };
+                (label, d.clone())
+            })
+            .collect();
+        let any_full = trashes.iter().any(|(_, d)| full(d));
+        let line = gtk::Box::builder().spacing(11).build();
+        line.append(&gtk::Image::from_gicon(&themed(if any_full { "user-trash-full-symbolic" } else { "user-trash-symbolic" })));
+        line.append(&gtk::Label::builder().label("Trash").hexpand(true).xalign(0.0).build());
+        if trashes.len() > 1 {
+            let menu = gio::Menu::new();
+            for (i, (label, _)) in trashes.iter().enumerate() {
+                let item = gio::MenuItem::new(Some(&format!("Trash on {label}")), None);
+                item.set_action_and_target_value(Some("win.open-trash"), Some(&(i as i32).to_variant()));
+                menu.append_item(&item);
             }
-            let name = if i == 0 {
-                "Trash".to_string()
-            } else {
-                let on = tops.iter().find(|(t, _)| dir.starts_with(t)).map_or("drive".to_string(), |(_, n)| n.clone());
-                format!("Trash on {on}")
-            };
-            add(themed(if full { "user-trash-full-symbolic" } else { "user-trash-symbolic" }), &name, Place::Path(dir), None, None);
+            line.append(&gtk::MenuButton::builder().icon_name("pan-down-symbolic").menu_model(&menu).css_classes(["flat", "eject"]).tooltip_text("Trash on other drives").build());
         }
+        self.places.append(&line);
+        places.borrow_mut().push(Some(Place::Path(dirs[0].clone())));
+        *self.trashes.borrow_mut() = trashes;
 
         title("DEVICES");
         add(themed("drive-harddisk-symbolic"), "Root", Place::Path(PathBuf::from("/")), devices::usage(std::path::Path::new("/")), None);

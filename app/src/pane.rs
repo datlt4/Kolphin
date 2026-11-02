@@ -461,6 +461,12 @@ impl Pane {
         self.canvas.reset(show_hidden);
         self.canvas.set_dir(path.clone());
         self.trash_bar.set_visible(ops_trash(&path));
+        if let Some(label) = self.trash_bar.first_child().and_downcast::<gtk::Label>() {
+            // files/ → .Trash-<uid> → the drive it belongs to.
+            let home_trash = glib::user_data_dir().join("Trash/files");
+            let drive = path.parent().and_then(|t| t.parent()).map(|d| d.display().to_string()).unwrap_or_default();
+            label.set_text(&if path == home_trash { "Trash".to_string() } else { format!("Trash on {drive}") });
+        }
         self.filter.set_text("");
         self.filter_bar.set_reveal_child(false);
         self.apply_props(&viewprops::load(&path).unwrap_or_default());
