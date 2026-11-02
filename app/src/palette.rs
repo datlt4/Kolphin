@@ -11,6 +11,7 @@ const COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("Split View", "F3", "win.split", None),
     ("Show Hidden Files", "Ctrl+H", "win.toggle-hidden", None),
     ("Filter", "Ctrl+I", "win.filter", None),
+    ("Search Subfolders", "Ctrl+F", "win.search", None),
     ("Select by Pattern", "", "win.select-pattern", None),
     ("Random Sample", "", "win.random-sample", None),
     ("Folder Statistics", "", "win.stats", None),

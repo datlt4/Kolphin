@@ -73,12 +73,12 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 ### M7 — Drop Shelf ✅ (v0.9.0)
 - ✅ Giữ chuột trái + lắc ngang (≥4 lần đổi hướng trong 0,7 s) → kệ hiện cạnh con trỏ, luôn nổi trên cùng (X11, theo dõi chuột toàn màn hình qua XQueryPointer). Kệ giữ đường dẫn, kéo ra một lần là xong; Copy here / Move here vào thư mục đang mở; Ctrl+Shift+D mở kệ thủ công (cả Wayland).
 
-### M8 — Tích hợp hệ thống
-- Đặt làm file manager mặc định (`xdg-mime` + D-Bus `org.freedesktop.FileManager1` cho "Show in folder").
-- Backend portal FileChooser (app Snap/Flatpak/Chrome/Qt dùng portal; app GTK3 native không thay được).
-- **Khôi phục phiên**: tabs + split view mở lại như lúc thoát.
-- **Tìm kiếm song song** kiểu `fd`, kết quả hiện dần.
-- AppImage (tự thay file khi update); tuỳ chọn tắt tự kiểm tra update.
+### M8 — Tích hợp hệ thống (phần lớn ✅ v0.10.0)
+- ✅ Đặt làm file manager mặc định (`xdg-mime` + D-Bus `org.freedesktop.FileManager1` cho "Show in folder"; hoàn tác được).
+- Còn: backend portal FileChooser (app Snap/Flatpak/Chrome/Qt dùng portal; app GTK3 native không thay được).
+- ✅ **Khôi phục phiên**: tabs + split view mở lại như lúc thoát.
+- ✅ **Tìm kiếm song song** trong thư mục con (Ctrl+F), kết quả hiện dần.
+- ✅ Tuỳ chọn tắt tự kiểm tra update. Còn: AppImage.
 
 ### Sau Linux
 - Windows / macOS: lớp platform riêng (GIO/gvfs yếu ở đó), đóng gói `.msi` / `.app`.

@@ -4,6 +4,7 @@ mod canvas;
 mod clipboard;
 mod devices;
 mod dialogs;
+mod fm;
 mod git;
 mod icons;
 mod kermius;
@@ -16,6 +17,7 @@ mod pathbar;
 mod props;
 mod shelf;
 mod quicklook;
+mod search;
 mod stats;
 mod thumbs;
 mod update;
@@ -106,6 +108,8 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .shelf { padding: 12px; background: @kolphin_side; border: 1px solid @kolphin_border; border-radius: 14px; }
 .shelf-list { background: @kolphin_elev; border-radius: 10px; padding: 6px; min-height: 120px; }
 .toast { padding: 8px 8px 8px 16px; border-radius: 12px; background: #262b38; color: #e6e8ee; border: 1px solid #363c4b; box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
+.filterbar button:checked { background: alpha(@accent_color, 0.22); color: #ffffff; box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.6); }
+.filterbar { margin: 0 12px 6px; }
 .trash-bar { margin: 0 12px 6px; padding: 6px 6px 6px 12px; border-radius: 9px; background: @kolphin_elev; border: 1px solid @kolphin_border; }
 .pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }
 .pane-close:hover { background: @kolphin_hover_strong; color: #ffffff; }
@@ -143,8 +147,10 @@ fn main() -> glib::ExitCode {
         }
         window::set_accels(app);
         shelf::watch(app.upcast_ref());
+        fm::serve(app);
     });
     app.connect_activate(|app| window::open(app, &[]));
+    app.connect_shutdown(|_| window::save_sessions());
     app.connect_open(|app, files, _| {
         let paths: Vec<_> = files.iter().filter_map(|f| f.path()).filter(|p| p.is_dir()).collect();
         window::open(app, &paths);

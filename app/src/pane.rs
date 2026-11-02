@@ -37,6 +37,9 @@ pub struct Pane {
     syncing: Cell<bool>,
     filter: gtk::SearchEntry,
     filter_bar: gtk::Revealer,
+    /// Filter mode: search recursively instead of filtering this folder.
+    subfolders: gtk::ToggleButton,
+    searching: Cell<bool>,
     path: RefCell<PathBuf>,
     back: RefCell<Vec<PathBuf>>,
     forward: RefCell<Vec<PathBuf>>,
@@ -84,7 +87,11 @@ impl Pane {
         status_bar.append(&slider);
         let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text or pattern like *.jpg").hexpand(true).build();
         crate::dialogs::ime_safe(&filter);
-        let filter_bar = gtk::Revealer::builder().child(&filter).css_classes(["filterbar"]).build();
+        let subfolders = gtk::ToggleButton::builder().label("Subfolders").tooltip_text("Search this folder and everything below it").build();
+        let filter_row = gtk::Box::builder().spacing(6).build();
+        filter_row.append(&filter);
+        filter_row.append(&subfolders);
+        let filter_bar = gtk::Revealer::builder().child(&filter_row).css_classes(["filterbar"]).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let close = gtk::Button::builder().icon_name("window-close-symbolic").css_classes(["flat", "pane-close"]).tooltip_text("Close this view").valign(gtk::Align::Center).visible(false).build();
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -116,6 +123,8 @@ impl Pane {
             syncing: Default::default(),
             filter,
             filter_bar,
+            subfolders,
+            searching: Default::default(),
             path: RefCell::new(path),
             back: Default::default(),
             forward: Default::default(),
@@ -155,11 +164,12 @@ impl Pane {
         }));
         pane.filter.connect_search_changed(glib::clone!(#[strong] weak, move |e| {
             if let Some(pane) = weak.upgrade() {
-                let text = e.text().to_string();
-                pane.canvas.update(|m| {
-                    m.filter = text;
-                    m.rebuild_order();
-                });
+                pane.apply_filter(e.text().to_string());
+            }
+        }));
+        pane.subfolders.connect_toggled(glib::clone!(#[strong] weak, move |_| {
+            if let Some(pane) = weak.upgrade() {
+                pane.apply_filter(pane.filter.text().to_string());
             }
         }));
         pane.filter.connect_stop_search(glib::clone!(#[strong] weak, move |_| {
@@ -339,7 +349,7 @@ impl Pane {
         }
     }
 
-    pub fn toggle_filter(&self) {
+    pub fn toggle_filter(self: &Rc<Self>) {
         if self.filter_bar.reveals_child() && self.filter.has_focus() {
             self.close_filter();
         } else {
@@ -348,10 +358,73 @@ impl Pane {
         }
     }
 
-    fn close_filter(&self) {
+    /// Ctrl+F: the filter bar in Subfolders mode.
+    pub fn start_search(self: &Rc<Self>) {
+        self.subfolders.set_active(true);
+        self.filter_bar.set_reveal_child(true);
+        self.filter.grab_focus();
+    }
+
+    fn close_filter(self: &Rc<Self>) {
+        if self.searching.get() {
+            self.load();
+        }
         self.filter.set_text("");
         self.filter_bar.set_reveal_child(false);
         self.canvas.grab_focus();
+    }
+
+    /// The filter text: narrows this folder, or with Subfolders on searches below it (2+ characters).
+    fn apply_filter(self: &Rc<Self>, text: String) {
+        // Input methods commit words with a trailing space.
+        let text = text.trim().to_string();
+        if self.subfolders.is_active() && text.chars().count() >= 2 {
+            return self.search(text);
+        }
+        if self.searching.get() {
+            // Back to the folder itself, keeping the text as a filter.
+            self.load();
+            self.filter_bar.set_reveal_child(true);
+            if self.filter.text().trim() != text {
+                self.filter.set_text(&text);
+            }
+        }
+        self.canvas.update(|m| {
+            m.filter = text;
+            m.rebuild_order();
+        });
+    }
+
+    /// Recursive search from this folder; results are named by their relative path.
+    fn search(self: &Rc<Self>, query: String) {
+        let generation = self.generation.get() + 1;
+        self.generation.set(generation);
+        self.searching.set(true);
+        self.monitor.take();
+        let show_hidden = self.canvas.model().show_hidden;
+        self.canvas.reset(show_hidden);
+        self.loading.set(true);
+        self.status.set_text("Searching…");
+        let (tx, rx) = async_channel::bounded(16);
+        let root = self.path();
+        std::thread::spawn(move || crate::search::run(root, query, show_hidden, tx));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(msg) = rx.recv().await {
+                let Some(pane) = weak.upgrade() else { return };
+                if pane.generation.get() != generation {
+                    return;
+                }
+                match msg {
+                    Msg::Entries(batch) => pane.canvas.update(|m| m.append(batch)),
+                    Msg::Done => {
+                        pane.loading.set(false);
+                        pane.update_status();
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
     fn props(&self) -> ViewProps {
@@ -452,6 +525,7 @@ impl Pane {
     }
 
     fn load(self: &Rc<Self>) {
+        self.searching.set(false);
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         self.monitor.take();

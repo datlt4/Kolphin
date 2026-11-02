@@ -124,7 +124,7 @@ fn worker(pool: &Pool) {
 }
 
 /// Is the block device behind `dev` (st_dev) a spinning disk?
-fn rotational(dev: u64) -> bool {
+pub fn rotational(dev: u64) -> bool {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
     let base = format!("/sys/dev/block/{major}:{minor}");

@@ -79,6 +79,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.zoom-in", &["<Control>plus", "<Control>equal"]),
         ("win.zoom-out", &["<Control>minus"]),
         ("win.filter", &["<Control>i"]),
+        ("win.search", &["<Control>f"]),
         ("win.new-folder", &["<Control><Shift>n"]),
         ("win.show-sidebar", &["F9"]),
         ("win.terminal", &["F4"]),
@@ -91,17 +92,68 @@ pub fn set_accels(app: &adw::Application) {
 
 pub fn open(app: &adw::Application, paths: &[PathBuf]) {
     let win = Win::new(app);
-    if paths.is_empty() {
-        win.add_tab(glib::home_dir());
+    // A plain start reopens the last session's tabs (and split views).
+    let session = if paths.is_empty() && WINDOWS.with(|w| w.borrow().is_empty()) { viewprops::load_session() } else { None };
+    match session {
+        Some(s) => {
+            for tab in &s.tabs {
+                win.add_tab(tab[0].clone());
+                if let Some(second) = tab.get(1) {
+                    win.toggle_split();
+                    win.pane().navigate(second.clone());
+                }
+            }
+            if let Some(page) = win.tab_list.borrow().get(s.selected).map(|t| t.page.clone()) {
+                win.tabs.set_selected_page(&page);
+            }
+        }
+        None if paths.is_empty() => win.add_tab(glib::home_dir()),
+        None => {}
     }
     for p in paths {
         win.add_tab(p.clone());
     }
     win.window.present();
-    if !UPDATE_CHECKED.replace(true) {
+    if viewprops::check_updates_on_start() && !UPDATE_CHECKED.replace(true) {
         crate::check_update(&win.toasts, false);
     }
     WINDOWS.with(|w| w.borrow_mut().push(win));
+}
+
+/// "Show in folder": open each item's folder and select the item (optionally its Properties).
+pub fn reveal(app: &adw::Application, items: &[PathBuf], properties: bool) {
+    let Some(first) = items.first() else { return };
+    let Some(parent) = first.parent().map(PathBuf::from) else { return };
+    let existing = WINDOWS.with(|w| w.borrow().last().cloned());
+    let win = match existing {
+        Some(win) => {
+            win.add_tab(parent);
+            win
+        }
+        None => {
+            open(app, &[parent]);
+            match WINDOWS.with(|w| w.borrow().last().cloned()) {
+                Some(w) => w,
+                None => return,
+            }
+        }
+    };
+    win.window.present();
+    if let Some(name) = first.file_name() {
+        win.pane().select_when_loaded(name.to_os_string());
+    }
+    if properties {
+        props::show(win.window.upcast_ref(), first.clone());
+    }
+}
+
+/// Remember every window's tabs (called when the app quits, e.g. to restart after an update).
+pub fn save_sessions() {
+    WINDOWS.with(|w| {
+        if let Some(win) = w.borrow().last() {
+            win.save_session();
+        }
+    });
 }
 
 fn mode_name(m: ViewMode) -> &'static str {
@@ -145,6 +197,8 @@ impl Win {
         menu.append(Some("Edit Custom Actions…"), Some("win.edit-actions"));
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
+        menu.append(Some("Use Kolphin as Default File Manager"), Some("win.default-fm"));
+        menu.append(Some("Check for Updates on Start"), Some("win.auto-update"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
         header.pack_end(&gtk::ToggleButton::builder().icon_name("view-dual-symbolic").action_name("win.split").tooltip_text("Split View (F3)").build());
@@ -238,6 +292,15 @@ impl Win {
             }
         }));
         win.window.add_controller(click);
+        win.window.connect_close_request(glib::clone!(
+            #[strong] weak,
+            move |_| {
+                if let Some(win) = weak.upgrade() {
+                    win.save_session();
+                }
+                glib::Propagation::Proceed
+            }
+        ));
         win.window.connect_destroy(glib::clone!(#[strong] weak, move |_| {
             WINDOWS.with(|w| w.borrow_mut().retain(|x| !std::ptr::eq(Rc::as_ptr(x), weak.as_ptr())));
         }));
@@ -405,6 +468,16 @@ impl Win {
         }
     }
 
+    fn save_session(&self) {
+        let tabs = self.tab_list.borrow();
+        // Tabs in their on-screen order.
+        let mut ordered: Vec<_> = tabs.iter().map(|t| (self.tabs.page_position(&t.page), t.clone())).collect();
+        ordered.sort_by_key(|(i, _)| *i);
+        let selected = self.tabs.selected_page().map_or(0, |p| self.tabs.page_position(&p).max(0) as usize);
+        let tabs = ordered.into_iter().map(|(_, t)| t.panes.borrow().iter().map(|p| p.path()).collect()).collect();
+        viewprops::save_session(&viewprops::Session { tabs, selected });
+    }
+
     /// Put the sidebar on the left or right.
     fn place_sidebar(&self, right: bool) {
         let c = &self.content;
@@ -450,6 +523,7 @@ impl Win {
         add("zoom-out", |w| w.pane().canvas.zoom_by(false));
         add("check-update", |w| crate::check_update(&w.toasts, true));
         add("filter", |w| w.pane().toggle_filter());
+        add("search", |w| w.pane().start_search());
         add("copy", |w| clipboard::copy(&w.pane(), false, &w.toasts));
         add("cut", |w| clipboard::copy(&w.pane(), true, &w.toasts));
         add("paste", |w| clipboard::paste(&w.pane(), &w.toasts));
@@ -768,6 +842,23 @@ impl Win {
         });
         stateful("show-sidebar", true.to_variant(), |w, v| {
             w.sidebar.set_visible(v.get::<bool>().unwrap_or(true));
+        });
+        stateful("default-fm", crate::fm::is_default().to_variant(), |w, v| {
+            let on = v.get::<bool>().unwrap_or(false);
+            let msg = match crate::fm::set_default(on) {
+                Ok(()) if on => {
+                    if let Some(app) = w.window.application().and_downcast::<adw::Application>() {
+                        crate::fm::serve(&app);
+                    }
+                    "Kolphin now opens folders and \"Show in folder\"".to_string()
+                }
+                Ok(()) => "Files (Nautilus) is the default file manager again".to_string(),
+                Err(e) => format!("Could not change the default: {e}"),
+            };
+            w.toasts.add_toast(notify::Toast::new(&msg));
+        });
+        stateful("auto-update", viewprops::check_updates_on_start().to_variant(), |_, v| {
+            viewprops::set_check_updates_on_start(v.get::<bool>().unwrap_or(true));
         });
         stateful("sidebar-right", viewprops::sidebar_right().to_variant(), |w, v| {
             let right = v.get::<bool>().unwrap_or(false);

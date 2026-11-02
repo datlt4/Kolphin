@@ -124,6 +124,36 @@ pub fn set_custom_icon(paths: &[PathBuf], icon: Option<&str>) {
     }
 }
 
+/// Tabs of the last closed window: each tab's folders (two in split view), and the selected tab.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Session {
+    pub tabs: Vec<Vec<PathBuf>>,
+    pub selected: usize,
+}
+
+pub fn save_session(s: &Session) {
+    let mut v = settings();
+    v["session"] = serde_json::to_value(s).unwrap_or_default();
+    let _ = std::fs::write(settings_file(), v.to_string());
+}
+
+/// The saved session, keeping only folders that still exist.
+pub fn load_session() -> Option<Session> {
+    let mut s: Session = serde_json::from_value(settings()["session"].clone()).ok()?;
+    s.tabs = s.tabs.into_iter().map(|t| t.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>()).filter(|t| !t.is_empty()).collect();
+    (!s.tabs.is_empty()).then_some(s)
+}
+
+pub fn check_updates_on_start() -> bool {
+    settings()["check_updates"].as_bool().unwrap_or(true)
+}
+
+pub fn set_check_updates_on_start(on: bool) {
+    let mut v = settings();
+    v["check_updates"] = on.into();
+    let _ = std::fs::write(settings_file(), v.to_string());
+}
+
 /// Servers connected to before, newest first.
 pub fn recent_servers() -> Vec<String> {
     settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
