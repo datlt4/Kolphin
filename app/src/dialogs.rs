@@ -145,6 +145,37 @@ pub fn choose(parent: &gtk::Window, title: &str, hint: &str, items: Vec<String>,
     }
 }
 
+/// Name clashes in a copy/move: Replace (old ones to the trash), Skip, or Keep Both; closing cancels.
+pub fn conflict(parent: &gtk::Window, n: usize, dest: &str, f: impl Fn(crate::ops::Conflict) + 'static) {
+    use crate::ops::Conflict;
+    let (win, body) = dialog(parent, "Items Already Exist", 460, -1);
+    body.append(&gtk::Label::builder().label(format!("{n} item(s) with the same name already exist in “{dest}”.")).xalign(0.0).wrap(true).build());
+    body.append(&gtk::Label::builder().label("Replace moves the existing items to the trash.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    let buttons = gtk::Box::builder().spacing(8).halign(gtk::Align::End).build();
+    let f = std::rc::Rc::new(f);
+    for (label, choice, class) in [("Skip", Conflict::Skip, ""), ("Replace", Conflict::Replace, "destructive-action"), ("Keep Both", Conflict::KeepBoth, "suggested-action")] {
+        let b = gtk::Button::with_label(label);
+        if !class.is_empty() {
+            b.add_css_class(class);
+        }
+        let f = f.clone();
+        b.connect_clicked(glib::clone!(#[weak] win, move |_| {
+            f(choice);
+            win.close();
+        }));
+        buttons.append(&b);
+        if choice == Conflict::KeepBoth {
+            win.set_default_widget(Some(&b));
+        }
+    }
+    body.append(&buttons);
+    win.present();
+    // Enter = Keep Both, the choice that loses nothing.
+    if let Some(keep) = buttons.last_child() {
+        keep.grab_focus();
+    }
+}
+
 /// Yes/no question; `f` runs only on confirmation.
 pub fn confirm(parent: &gtk::Window, title: &str, text: &str, action: &str, f: impl Fn() + 'static) {
     let (win, body) = dialog(parent, title, 420, -1);

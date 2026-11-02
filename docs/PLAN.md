@@ -49,7 +49,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 ### M4 — Thao tác file (phần lớn ✅ v0.6.0)
 - ✅ Cut/Copy/Paste cơ bản (clipboard chung với Nautilus).
 - ✅ Tạo symlink / hardlink; emblem symlink kiểu Ubuntu.
-- ✅ Hàng đợi copy/move chạy tuần tự, có % và tốc độ; trùng tên tự đổi "(copy)". Còn: pause/resume, hộp thoại xử lý trùng tên, kiểm tra lại bằng xxHash sau copy.
+- ✅ Hàng đợi copy/move chạy tuần tự, có % và tốc độ, nút Cancel (xoá phần copy dở); trùng tên hỏi Replace (cũ vào Trash) / Skip / Keep Both. Còn: pause/resume, kiểm tra lại bằng xxHash sau copy.
 - ✅ Trash/xoá/đổi tên (F2), folder mới, **Ctrl+Z undo** (rename, move, copy, trash, link), đổi tên hàng loạt có xem trước (regex, `{n}`).
 - ✅ Kéo thả vào/ra app khác (cùng ổ = move, khác ổ = copy; Shift/Ctrl để ép).
 - ✅ "Mở bằng…" + đặt app mặc định.

@@ -5,7 +5,8 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 pub enum Undo {
@@ -298,15 +299,33 @@ pub struct Progress {
     pub finished: Option<Result<Undo, String>>,
 }
 
+/// What to do when an item with the same name is already in the destination.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Conflict {
+    /// The existing item goes to the trash.
+    Replace,
+    Skip,
+    /// The new one is named "x (copy)".
+    KeepBoth,
+}
+
+/// How many sources would land on an existing name in `dest`.
+pub fn conflicts(sources: &[PathBuf], dest: &Path) -> usize {
+    sources.iter().filter(|s| s.parent() != Some(dest) && s.file_name().is_some_and(|n| std::fs::symlink_metadata(dest.join(n)).is_ok())).count()
+}
+
 struct Job {
     sources: Vec<PathBuf>,
     dest: PathBuf,
     cut: bool,
+    policy: Conflict,
+    cancel: Arc<AtomicBool>,
     tx: async_channel::Sender<Progress>,
 }
 
-/// Copy or move into `dest`; jobs run one at a time (no two big copies fighting over a disk).
-pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool) -> async_channel::Receiver<Progress> {
+/// Copy or move into `dest`; jobs run one at a time (no two big copies fighting over a disk). Setting `cancel`
+/// stops it, removing the partly copied item.
+pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: Conflict, cancel: Arc<AtomicBool>) -> async_channel::Receiver<Progress> {
     static QUEUE: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
     let queue = QUEUE.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
@@ -318,7 +337,7 @@ pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool) -> async_channe
         tx
     });
     let (tx, rx) = async_channel::unbounded();
-    let _ = queue.send(Job { sources, dest, cut, tx });
+    let _ = queue.send(Job { sources, dest, cut, policy, cancel, tx });
     rx
 }
 
@@ -345,27 +364,52 @@ fn run(job: Job) {
         let (mut created, mut moved) = (Vec::new(), Vec::new());
         let mut last = Instant::now();
         for src in &job.sources {
+            if job.cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".into());
+            }
             let name = src.file_name().ok_or("bad path")?;
             if job.cut && src.parent() == Some(job.dest.as_path()) {
                 p.done_items += 1;
                 continue;
             }
-            let target = unique(&job.dest.join(name));
+            let wanted = job.dest.join(name);
+            // Copying into its own folder always keeps both.
+            let clash = std::fs::symlink_metadata(&wanted).is_ok() && src.parent() != Some(job.dest.as_path());
+            let target = match job.policy {
+                _ if !clash => unique(&wanted),
+                Conflict::Skip => {
+                    p.done_items += 1;
+                    continue;
+                }
+                Conflict::Replace => {
+                    trash(std::slice::from_ref(&wanted))?;
+                    wanted
+                }
+                Conflict::KeepBoth => unique(&wanted),
+            };
             let renamed = job.cut && std::fs::rename(src, &target).is_ok();
             if !renamed {
                 let tx = &job.tx;
                 let (total_bytes, done_items) = (p.total_bytes, p.done_items);
                 let mut done_bytes = p.done_bytes;
-                copy_tree(src, &target, &mut |n| {
+                let cancel = &job.cancel;
+                let copied = copy_tree(src, &target, &mut |n| {
                     done_bytes += n;
+                    if cancel.load(Ordering::Relaxed) {
+                        return false;
+                    }
                     if last.elapsed() > Duration::from_millis(150) {
                         last = Instant::now();
                         let msg = Progress { done_bytes, total_bytes, done_items, total_items, finished: None };
                         return tx.send_blocking(msg).is_ok();
                     }
                     true
-                })
-                .map_err(|e| format!("{}: {e}", src.display()))?;
+                });
+                if let Err(e) = copied {
+                    // Leave no half-copied item behind.
+                    let _ = if target.is_dir() && !target.is_symlink() { std::fs::remove_dir_all(&target) } else { std::fs::remove_file(&target) };
+                    return Err(if job.cancel.load(Ordering::Relaxed) { "Cancelled".into() } else { format!("{}: {e}", src.display()) });
+                }
                 p.done_bytes = done_bytes;
                 if job.cut {
                     let r = if src.is_dir() && !src.is_symlink() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
@@ -434,6 +478,27 @@ pub fn describe(p: &Progress, cut: bool, started: Instant) -> String {
 mod tests {
     use super::*;
 
+    fn transfer_keep(sources: Vec<PathBuf>, dest: PathBuf, cut: bool) -> async_channel::Receiver<Progress> {
+        transfer(sources, dest, cut, Conflict::KeepBoth, Default::default())
+    }
+
+    #[test]
+    fn conflict_policies() {
+        let root = std::env::temp_dir().join(format!("kolphin-conflict-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("f.txt"), "new").unwrap();
+        std::fs::write(b.join("f.txt"), "old").unwrap();
+        assert_eq!(conflicts(&[a.join("f.txt")], &b), 1);
+        wait(transfer(vec![a.join("f.txt")], b.clone(), false, Conflict::Skip, Default::default())).unwrap();
+        assert_eq!(std::fs::read_to_string(b.join("f.txt")).unwrap(), "old");
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+        assert_eq!(wait(transfer(vec![a.join("f.txt")], b.clone(), false, Conflict::KeepBoth, cancel)).err().as_deref(), Some("Cancelled"));
+        assert!(!b.join("f (copy).txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn wait(rx: async_channel::Receiver<Progress>) -> Result<Undo, String> {
         loop {
             if let Some(r) = rx.recv_blocking().unwrap().finished {
@@ -452,13 +517,13 @@ mod tests {
         std::fs::write(a.join("sub/g.txt"), "y").unwrap();
         std::os::unix::fs::symlink("f.txt", a.join("link")).unwrap();
 
-        assert!(matches!(wait(transfer(vec![a.join("f.txt"), a.join("sub"), a.join("link")], b.clone(), false)), Ok(Undo::Created(v)) if v.len() == 3));
+        assert!(matches!(wait(transfer_keep(vec![a.join("f.txt"), a.join("sub"), a.join("link")], b.clone(), false)), Ok(Undo::Created(v)) if v.len() == 3));
         assert!(b.join("sub/g.txt").exists() && b.join("link").is_symlink());
-        wait(transfer(vec![a.join("f.txt")], b.clone(), false)).unwrap();
+        wait(transfer_keep(vec![a.join("f.txt")], b.clone(), false)).unwrap();
         assert!(b.join("f (copy).txt").exists());
-        assert!(matches!(wait(transfer(vec![a.join("sub")], b.clone(), true)), Ok(Undo::Moved(_))));
+        assert!(matches!(wait(transfer_keep(vec![a.join("sub")], b.clone(), true)), Ok(Undo::Moved(_))));
         assert!(!a.join("sub").exists() && b.join("sub (copy)/g.txt").exists());
-        assert!(wait(transfer(vec![b.clone()], b.join("sub"), false)).is_err());
+        assert!(wait(transfer_keep(vec![b.clone()], b.join("sub"), false)).is_err());
 
         // Volume-trash fallback round trip.
         let tdir = root.join(".Trash-test");

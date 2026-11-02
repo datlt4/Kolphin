@@ -52,11 +52,31 @@ pub fn paste(pane: &Rc<Pane>, toasts: &gtk::Overlay) {
     }));
 }
 
-/// Start a copy/move job and show its progress in a toast; the result can be undone.
+/// Start a copy/move job (asking first about name clashes) and show its progress in a toast with Cancel;
+/// the result can be undone.
 pub fn run_transfer(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool) {
-    let status = notify::Toast::builder().title(if cut { "Moving…" } else { "Copying…" }).timeout(0).build();
+    let clashes = ops::conflicts(&sources, &dest);
+    let parent = toasts.root().and_downcast::<gtk::Window>();
+    match parent {
+        Some(parent) if clashes > 0 => {
+            let name = dest.file_name().map_or("/".into(), |n| n.to_string_lossy().into_owned());
+            let toasts = toasts.clone();
+            crate::dialogs::conflict(&parent, clashes, &name, move |policy| start(&toasts, sources.clone(), dest.clone(), cut, policy));
+        }
+        _ => start(toasts, sources, dest, cut, ops::Conflict::KeepBoth),
+    }
+}
+
+fn start(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: ops::Conflict) {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let c = cancel.clone();
+    let status = notify::Toast::builder()
+        .title(if cut { "Moving…" } else { "Copying…" })
+        .timeout(0)
+        .on_button("Cancel", move || c.store(true, std::sync::atomic::Ordering::Relaxed))
+        .build();
     toasts.add_toast(status.clone());
-    let rx = ops::transfer(sources, dest, cut);
+    let rx = ops::transfer(sources, dest, cut, policy, cancel);
     let started = std::time::Instant::now();
     glib::spawn_future_local(glib::clone!(#[weak] toasts, async move {
         while let Ok(p) = rx.recv().await {
@@ -69,6 +89,7 @@ pub fn run_transfer(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf,
                             ops::record(undo);
                             format!("{} {} item(s) · Ctrl+Z to undo", if cut { "Moved" } else { "Copied" }, p.done_items)
                         }
+                        Err(e) if e == "Cancelled" => format!("{} cancelled", if cut { "Move" } else { "Copy" }),
                         Err(e) => format!("{} failed: {e}", if cut { "Move" } else { "Copy" }),
                     };
                     toasts.add_toast(notify::Toast::new(&msg));
