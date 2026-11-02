@@ -86,6 +86,8 @@ progressbar trough { min-height: 6px; border-radius: 99px; background: @kolphin_
 progressbar progress { min-height: 6px; border-radius: 99px; background: @accent_color; }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
+.pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }
+.pane-close:hover { background: @kolphin_hover_strong; color: #ffffff; }
 scrollbar { background: transparent; border: none; }
 scrollbar slider { background: #363c4b; border-radius: 99px; }
 scrollbar.vertical slider { min-width: 6px; min-height: 48px; }

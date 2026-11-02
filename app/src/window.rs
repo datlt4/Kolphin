@@ -67,6 +67,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.zoom-out", &["<Control>minus"]),
         ("win.filter", &["<Control>i"]),
         ("win.new-folder", &["<Control><Shift>n"]),
+        ("win.show-sidebar", &["F9"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -122,10 +123,12 @@ impl Win {
         menu.append(Some("Select by Pattern…"), Some("win.select-pattern"));
         menu.append(Some("Random Sample…"), Some("win.random-sample"));
         menu.append(Some("Folder Statistics…"), Some("win.stats"));
+        menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
         header.pack_end(&gtk::ToggleButton::builder().icon_name("view-dual-symbolic").action_name("win.split").tooltip_text("Split View (F3)").build());
+        header.pack_end(&gtk::Button::builder().icon_name("tab-new-symbolic").action_name("win.new-tab").tooltip_text("New Tab (Ctrl+T)").build());
         let view_button = gtk::MenuButton::builder().icon_name("view-grid-symbolic").menu_model(&view_menu()).tooltip_text("View, sort and group").build();
         header.pack_end(&view_button);
 
@@ -258,6 +261,11 @@ impl Win {
                 win.sync();
             }
         })));
+        pane.close.connect_clicked(glib::clone!(#[strong] w, #[strong] t, #[strong] p, move |_| {
+            if let (Some(win), Some(tab), Some(pane)) = (w.upgrade(), t.upgrade(), p.upgrade()) {
+                win.close_pane(&tab, &pane);
+            }
+        }));
         *pane.on_drop.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |files, dir, cut| {
             if let Some(win) = w.upgrade() {
                 clipboard::run_transfer(&win.toasts, files, dir, cut);
@@ -305,14 +313,24 @@ impl Win {
             tab.paned.set_end_child(Some(&pane.root));
             tab.paned.set_position(tab.paned.width() / 2);
             tab.panes.borrow_mut().push(pane);
+            self.sync();
         } else {
-            tab.panes.borrow_mut().retain(|p| Rc::ptr_eq(p, &active));
-            tab.paned.set_start_child(None::<&gtk::Widget>);
-            tab.paned.set_end_child(None::<&gtk::Widget>);
-            tab.paned.set_start_child(Some(&active.root));
-            tab.active.set(0);
-            active.canvas.grab_focus();
+            let other = tab.panes.borrow().iter().find(|p| !Rc::ptr_eq(p, &active)).cloned();
+            if let Some(other) = other {
+                self.close_pane(&tab, &other);
+            }
         }
+    }
+
+    /// Leave split view by closing `gone`; the other side stays.
+    fn close_pane(&self, tab: &Rc<Tab>, gone: &Rc<Pane>) {
+        tab.panes.borrow_mut().retain(|p| !Rc::ptr_eq(p, gone));
+        let Some(keep) = tab.panes.borrow().first().cloned() else { return };
+        tab.paned.set_start_child(None::<&gtk::Widget>);
+        tab.paned.set_end_child(None::<&gtk::Widget>);
+        tab.paned.set_start_child(Some(&keep.root));
+        tab.active.set(0);
+        keep.canvas.grab_focus();
         self.sync();
     }
 
@@ -348,6 +366,7 @@ impl Win {
         }
         let split = tab.panes.borrow().len() > 1;
         for p in tab.panes.borrow().iter() {
+            p.close.set_visible(split);
             if split && !Rc::ptr_eq(p, &pane) {
                 p.root.add_css_class("pane-inactive");
             } else {
@@ -605,6 +624,9 @@ impl Win {
                 Some("dimensions") => GroupBy::Dimensions,
                 _ => GroupBy::None,
             });
+        });
+        stateful("show-sidebar", true.to_variant(), |w, v| {
+            w.sidebar.set_visible(v.get::<bool>().unwrap_or(true));
         });
         stateful("sidebar-right", viewprops::sidebar_right().to_variant(), |w, v| {
             let right = v.get::<bool>().unwrap_or(false);

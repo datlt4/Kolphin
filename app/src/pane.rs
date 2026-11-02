@@ -26,6 +26,8 @@ pub struct Pane {
     pub root: gtk::Box,
     pub pathbar: Rc<PathBar>,
     pub canvas: Canvas,
+    /// Shown in split view: closes this side.
+    pub close: gtk::Button,
     vscroll: gtk::Scrollbar,
     hscroll: gtk::Scrollbar,
     status: gtk::Label,
@@ -81,7 +83,12 @@ impl Pane {
         let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text or pattern like *.jpg").hexpand(true).build();
         let filter_bar = gtk::Revealer::builder().child(&filter).css_classes(["filterbar"]).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&pathbar.root);
+        let close = gtk::Button::builder().icon_name("window-close-symbolic").css_classes(["flat", "pane-close"]).tooltip_text("Close this view").valign(gtk::Align::Center).visible(false).build();
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        pathbar.root.set_hexpand(true);
+        top.append(&pathbar.root);
+        top.append(&close);
+        root.append(&top);
         root.append(&filter_bar);
         root.append(&view);
         root.append(&hscroll);
@@ -91,6 +98,7 @@ impl Pane {
             root,
             pathbar,
             canvas,
+            close,
             vscroll,
             hscroll,
             status,

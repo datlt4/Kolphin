@@ -357,7 +357,17 @@ impl Canvas {
 
     pub fn reset(&self, show_hidden: bool) {
         let imp = self.imp();
-        *imp.model.borrow_mut() = Model::default();
+        let old = std::mem::take(&mut *imp.model.borrow_mut());
+        let big = old.entries.len() > 50_000;
+        drop(old);
+        // glibc keeps the freed memory of millions of small names; hand it back to the OS.
+        #[cfg(target_env = "gnu")]
+        if big {
+            // SAFETY: malloc_trim only releases free heap pages.
+            unsafe { libc::malloc_trim(0) };
+        }
+        #[cfg(not(target_env = "gnu"))]
+        let _ = big;
         imp.model.borrow_mut().show_hidden = show_hidden;
         imp.texts.borrow_mut().clear();
         imp.cursor.set(None);

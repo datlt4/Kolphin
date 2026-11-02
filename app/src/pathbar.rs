@@ -43,6 +43,18 @@ impl PathBar {
         let click = gtk::GestureClick::new();
         click.connect_released(glib::clone!(#[weak] bar, move |_, _, _, _| bar.edit()));
         bar.scroller.add_controller(click);
+        // The mouse wheel scrolls long paths sideways.
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        wheel.connect_scroll(glib::clone!(
+            #[weak] bar,
+            #[upgrade_or] glib::Propagation::Proceed,
+            move |_, dx, dy| {
+                let adj = bar.scroller.hadjustment();
+                adj.set_value(adj.value() + (dx + dy) * 40.0);
+                glib::Propagation::Stop
+            }
+        ));
+        bar.scroller.add_controller(wheel);
 
         bar.entry.connect_activate(glib::clone!(#[weak] bar, move |e| {
             let text = e.text();

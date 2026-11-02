@@ -14,6 +14,7 @@ imagesize = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 jpeg-decoder = "0.3"
 kamadak-exif = "0.6"
+libc = "0.2"
 md-5 = "0.10"
 png = "0.18"
 sha2 = "0.10"
