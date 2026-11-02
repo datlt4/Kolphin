@@ -41,11 +41,13 @@ const CSS: &str = "
 @define-color kolphin_muted #8b91a1;
 @define-color kolphin_faint #5f6677;
 @define-color kolphin_hover #222632;
+@define-color kolphin_hover_strong #2c3243;
 
 window, .background { background: @window_bg_color; }
 headerbar { box-shadow: inset 0 -1px @kolphin_border; min-height: 46px; }
 headerbar button { border-radius: 8px; }
-headerbar button:hover { background: @kolphin_hover; }
+headerbar button:hover { background: @kolphin_hover_strong; color: #ffffff; box-shadow: inset 0 0 0 1px #3a4153; }
+headerbar button:active { background: #353c50; }
 headerbar button:checked { background: alpha(@accent_color, 0.16); color: #cfdcff; }
 
 .sidebar-pane { background: @kolphin_side; }
@@ -56,7 +58,7 @@ headerbar { background: @kolphin_side; }
 .brand label { font-weight: 700; font-size: 16px; }
 .places { background: transparent; padding: 0 10px 12px; }
 .places row { border-radius: 9px; padding: 7px 11px; margin: 1px 0; color: @kolphin_muted; }
-.places row:hover { background: @kolphin_hover; color: @window_fg_color; }
+.places row:hover { background: @kolphin_hover_strong; color: #ffffff; }
 .places row:selected { background: alpha(@accent_color, 0.14); color: #ffffff; }
 .places row:selected image { color: @accent_color; }
 .places row.side-title, .places row.side-title:hover { background: none; padding: 16px 11px 6px; font-size: 11px; font-weight: 600; letter-spacing: 1px; color: @kolphin_faint; }
@@ -66,13 +68,13 @@ headerbar .linked > button:not(:checked):not(:hover) { background: none; box-sha
 
 tabbar .box { background: @kolphin_side; border-bottom: 1px solid @kolphin_border; box-shadow: none; }
 tabbar tab { border-radius: 8px; margin: 6px 2px; color: @kolphin_muted; }
-tabbar tab:hover { background: @kolphin_hover; color: @window_fg_color; }
+tabbar tab:hover { background: @kolphin_hover_strong; color: #ffffff; }
 tabbar tab:selected { background: #262b38; color: #ffffff; box-shadow: inset 0 0 0 1px #363c4b; }
 
 .pathbar { background: @kolphin_elev; border: 1px solid @kolphin_border; border-radius: 9px; margin: 10px 12px 6px; min-height: 34px; }
 .pathbar entry { background: none; border: none; box-shadow: none; outline: none; min-height: 32px; }
 .pathbar button { padding: 2px 8px; min-height: 26px; margin: 3px 0; border-radius: 7px; color: @kolphin_muted; font-weight: 600; }
-.pathbar button:hover { background: @kolphin_hover; color: @window_fg_color; }
+.pathbar button:hover { background: @kolphin_hover_strong; color: #ffffff; }
 .pathbar button.current { color: @window_fg_color; }
 .pathbar label.dim-label { color: @kolphin_faint; opacity: 1; }
 .dialog-body { padding: 18px; }
