@@ -98,15 +98,17 @@ pub fn normalize(uri: &str) -> String {
 
 /// Mount `smb://`, `sftp://`, `ftp://`, `dav://` … through gvfs; passwords go through GTK's dialog and the keyring.
 pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<Connected, String>) + 'static) {
-    let file = gio::File::for_uri(&normalize(uri));
+    let uri = normalize(uri);
+    let file = gio::File::for_uri(&uri);
     let op = mount_op(parent);
-    let f = file.clone();
     file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |res| {
         match res {
             Ok(()) => {}
             Err(e) if e.matches(gio::IOErrorEnum::AlreadyMounted) => {}
             Err(e) => return done(Err(e.to_string())),
         }
+        // A File made before mounting still believes it is unmounted (no path); ask again.
+        let f = gio::File::for_uri(&uri);
         if let Some(path) = f.path() {
             return done(Ok(Connected::Path(path)));
         }

@@ -737,6 +737,43 @@ impl Win {
             w.fill_places();
             w.toasts.add_toast(notify::Toast::new(&format!("Bookmarked {n} folder(s)")));
         });
+        add("open-archive", |w| {
+            if let Some(a) = w.pane().selected_paths().into_iter().find(|p| crate::archive::is_archive(p)) {
+                // Not a server: don't remember it under Network.
+                let weak = w.weak();
+                devices::connect(w.window.upcast_ref(), &crate::archive::uri(&a), move |res| {
+                    let res = res.and_then(|c| match c {
+                        devices::Connected::Path(p) => Ok(p),
+                        devices::Connected::Shares(_) => Err("not an archive".into()),
+                    });
+                    win_open(&weak, res, None);
+                });
+            }
+        });
+        add("extract", |w| {
+            let archives: Vec<PathBuf> = w.pane().selected_paths().into_iter().filter(|p| crate::archive::is_archive(p)).collect();
+            let msg = match crate::archive::extract_here(&archives) {
+                Ok(()) => format!("Extracting {} archive(s)…", archives.len()),
+                Err(e) => format!("Extract failed: {e}"),
+            };
+            w.toasts.add_toast(notify::Toast::new(&msg));
+        });
+        add("compress", |w| {
+            let files = w.pane().selected_paths();
+            let Some(first) = files.first() else { return };
+            let stem = if files.len() == 1 { first.file_stem().unwrap_or_default().to_string_lossy().into_owned() } else { "Archive".into() };
+            let (dir, weak) = (w.pane().path(), w.weak());
+            let hint = "Archive name; the extension picks the format: .zip, .tar.gz, .tar.xz, .7z…";
+            dialogs::prompt(w.window.upcast_ref(), "Compress", hint, &format!("{stem}.zip"), move |name| {
+                let Some(w) = weak.upgrade() else { return };
+                let target = ops::unique(&dir.join(name.trim()));
+                let msg = match crate::archive::compress(&target, &files) {
+                    Ok(()) => format!("Compressing into {}…", target.file_name().unwrap_or_default().to_string_lossy()),
+                    Err(e) => format!("Compress failed: {e}"),
+                };
+                w.toasts.add_toast(notify::Toast::new(&msg));
+            });
+        });
         add("make-symlink", |w| make_links(w, false));
         add("make-hardlink", |w| make_links(w, true));
         add("open-tab-selected", |w| w.pane().open_selected(true));

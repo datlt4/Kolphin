@@ -680,7 +680,10 @@ impl Pane {
             section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook"), ("Add to Bookmarks", "win.add-bookmark")]);
             section(&[("Cut", "win.cut"), ("Copy", "win.copy"), ("Paste", "win.paste"), ("Copy Path", "win.copy-path")]);
             section(&[("Rename… (F2)", "win.rename"), ("Move to Trash (Del)", "win.trash"), ("Delete Permanently", "win.delete")]);
-            section(&[("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
+            if self.selected_paths().iter().any(|p| crate::archive::is_archive(p)) {
+                section(&[("Open Archive as Folder", "win.open-archive"), ("Extract Here", "win.extract")]);
+            }
+            section(&[("Compress…", "win.compress"), ("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
             section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {

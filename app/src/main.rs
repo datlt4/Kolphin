@@ -1,5 +1,6 @@
 mod actions;
 mod bookmarks;
+mod archive;
 mod canvas;
 mod clipboard;
 mod devices;
