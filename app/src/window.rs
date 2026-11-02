@@ -13,6 +13,7 @@ use crate::props;
 use crate::quicklook;
 use crate::stats;
 use crate::model::{GroupBy, SortBy};
+use crate::notify::{self, ToastExt};
 use crate::viewprops;
 use crate::pane::Pane;
 use adw::prelude::*;
@@ -38,7 +39,7 @@ impl Tab {
 pub struct Win {
     window: adw::ApplicationWindow,
     tabs: adw::TabView,
-    pub toasts: adw::ToastOverlay,
+    pub toasts: gtk::Overlay,
     tab_list: RefCell<Vec<Rc<Tab>>>,
     show_hidden: Cell<bool>,
     /// Last folder sent to (or reported by) the Kermius terminal.
@@ -176,7 +177,7 @@ impl Win {
         let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
         frame.append(&header);
         frame.append(&content);
-        let toasts = adw::ToastOverlay::new();
+        let toasts = notify::overlay();
         toasts.set_child(Some(&frame));
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -461,14 +462,14 @@ impl Win {
         });
         add("undo", |w| {
             let msg = ops::undo().unwrap_or_else(|e| e);
-            w.toasts.add_toast(adw::Toast::new(&msg));
+            w.toasts.add_toast(notify::Toast::new(&msg));
         });
         add("restore", |w| {
             let msg = match ops::restore_from_trash(&w.pane().selected_paths()) {
                 Ok(n) => format!("Restored {n} item(s)"),
                 Err(e) => format!("Restore failed: {e}"),
             };
-            w.toasts.add_toast(adw::Toast::new(&msg));
+            w.toasts.add_toast(notify::Toast::new(&msg));
             w.fill_places();
         });
         add("empty-trash", |w| {
@@ -481,7 +482,7 @@ impl Win {
                     Ok(n) => format!("Deleted {n} item(s) from the trash"),
                     Err(e) => format!("Empty trash failed: {e}"),
                 };
-                w.toasts.add_toast(adw::Toast::new(&msg));
+                w.toasts.add_toast(notify::Toast::new(&msg));
                 w.fill_places();
             });
         });
@@ -509,7 +510,7 @@ impl Win {
                     }
                     Err(e) => format!("Trash failed: {e}"),
                 };
-                toasts.add_toast(adw::Toast::new(&msg));
+                toasts.add_toast(notify::Toast::new(&msg));
             });
         });
         add("delete", |w| {
@@ -524,7 +525,7 @@ impl Win {
                 glib::spawn_future_local(async move {
                     let n = paths.len();
                     let res = gio::spawn_blocking(move || ops::delete_permanently(&paths)).await.unwrap_or_else(|_| Err("delete crashed".into()));
-                    toasts.add_toast(adw::Toast::new(&match res {
+                    toasts.add_toast(notify::Toast::new(&match res {
                         Ok(()) => format!("Deleted {n} item(s)"),
                         Err(e) => format!("Delete failed: {e}"),
                     }));
@@ -546,7 +547,7 @@ impl Win {
                                 ops::record(ops::Undo::Moved(vec![(from.clone(), to.clone())]));
                                 w.pane().select_when_loaded(to.file_name().unwrap_or_default().to_os_string());
                             }
-                            Err(e) => w.toasts.add_toast(adw::Toast::new(&format!("Rename failed: {e}"))),
+                            Err(e) => w.toasts.add_toast(notify::Toast::new(&format!("Rename failed: {e}"))),
                         }
                     });
                 }
@@ -561,7 +562,7 @@ impl Win {
                     }
                     let msg = format!("Renamed {} item(s){}", done.len(), errors.first().map(|e| format!(" · {} failed ({e})", errors.len())).unwrap_or_default());
                     ops::record(ops::Undo::Moved(done));
-                    w.toasts.add_toast(adw::Toast::new(&msg));
+                    w.toasts.add_toast(notify::Toast::new(&msg));
                 }),
             }
         });
@@ -576,7 +577,7 @@ impl Win {
                         ops::record(ops::Undo::Created(vec![p.clone()]));
                         w.pane().select_when_loaded(p.file_name().unwrap_or_default().to_os_string());
                     }
-                    Err(e) => w.toasts.add_toast(adw::Toast::new(&format!("New folder failed: {e}"))),
+                    Err(e) => w.toasts.add_toast(notify::Toast::new(&format!("New folder failed: {e}"))),
                 }
             });
         });
@@ -625,7 +626,7 @@ impl Win {
                 paths.push(w.pane().path());
             }
             if !kermius::get().share(paths) {
-                w.toasts.add_toast(adw::Toast::new("Sharing needs Kermius (Nearby Share)"));
+                w.toasts.add_toast(notify::Toast::new("Sharing needs Kermius (Nearby Share)"));
             }
         });
         add("edit-actions", |w| {
@@ -649,7 +650,7 @@ impl Win {
             let (Some(win), Some(i)) = (w.upgrade(), v.and_then(|v| v.get::<i32>())) else { return };
             let Some(a) = actions::load().into_iter().nth(i as usize) else { return };
             if let Err(e) = actions::run(&a, &win.pane().path(), &win.pane().selected_paths()) {
-                win.toasts.add_toast(adw::Toast::new(&format!("{}: {e}", a.name)));
+                win.toasts.add_toast(notify::Toast::new(&format!("{}: {e}", a.name)));
             }
         });
         self.window.add_action(&custom);
@@ -660,7 +661,7 @@ impl Win {
             }
             let n = bookmarks::add(&dirs);
             w.fill_places();
-            w.toasts.add_toast(adw::Toast::new(&format!("Bookmarked {n} folder(s)")));
+            w.toasts.add_toast(notify::Toast::new(&format!("Bookmarked {n} folder(s)")));
         });
         add("make-symlink", |w| make_links(w, false));
         add("make-hardlink", |w| make_links(w, true));
@@ -677,7 +678,7 @@ impl Win {
             let paths = w.pane().selected_paths();
             let text = paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join("\n");
             w.window.clipboard().set_text(&text);
-            w.toasts.add_toast(adw::Toast::new(&format!("Copied {} path(s)", paths.len())));
+            w.toasts.add_toast(notify::Toast::new(&format!("Copied {} path(s)", paths.len())));
         });
         add("stats", |w| {
             let pane = w.pane();
@@ -691,7 +692,7 @@ impl Win {
                     Ok(n) => format!("Selected {n} item(s)"),
                     Err(e) => format!("Bad pattern: {e}"),
                 };
-                w.toasts.add_toast(adw::Toast::new(&msg));
+                w.toasts.add_toast(notify::Toast::new(&msg));
             });
         });
         add("random-sample", |w| {
@@ -702,7 +703,7 @@ impl Win {
                     Ok(n) => format!("Selected {} random file(s)", w.pane().random_sample(n)),
                     Err(_) => "Enter a number".to_string(),
                 };
-                w.toasts.add_toast(adw::Toast::new(&msg));
+                w.toasts.add_toast(notify::Toast::new(&msg));
             });
         });
         add("change-icon", |w| {
@@ -884,7 +885,7 @@ impl Win {
             let dirs: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).filter(|p| p.is_dir()).collect();
             let n = bookmarks::add(&dirs);
             win.fill_places();
-            win.toasts.add_toast(adw::Toast::new(&if n > 0 { format!("Bookmarked {n} folder(s)") } else { "Only folders can be bookmarked".to_string() }));
+            win.toasts.add_toast(notify::Toast::new(&if n > 0 { format!("Bookmarked {n} folder(s)") } else { "Only folders can be bookmarked".to_string() }));
             n > 0
         });
         self.places.add_controller(drop);
@@ -930,7 +931,7 @@ impl Win {
         let weak = self.weak();
         let uri = devices::normalize(&uri);
         let u = uri.clone();
-        self.toasts.add_toast(adw::Toast::new(&format!("Connecting to {uri}…")));
+        self.toasts.add_toast(notify::Toast::new(&format!("Connecting to {uri}…")));
         devices::connect(self.window.upcast_ref(), &uri, move |res| match res {
             Ok(devices::Connected::Path(p)) => win_open(&weak, Ok(p), Some(u)),
             Ok(devices::Connected::Shares(shares)) => {
@@ -970,7 +971,7 @@ impl Win {
                     let w2 = win.weak();
                     let root = m.root().path();
                     let name = m.name().to_string();
-                    let busy = adw::Toast::builder().title(format!("Unmounting {name}…")).timeout(0).build();
+                    let busy = notify::Toast::builder().title(format!("Unmounting {name}…")).timeout(0).build();
                     win.toasts.add_toast(busy.clone());
                     devices::eject(win.window.upcast_ref(), m.clone(), move |res| {
                         busy.dismiss();
@@ -979,14 +980,14 @@ impl Win {
                         match res {
                             // Views inside the ejected drive go home instead of showing a vanished folder.
                             Ok(()) => {
-                                win.toasts.add_toast(adw::Toast::new(&format!("Unmounted {name}")));
+                                win.toasts.add_toast(notify::Toast::new(&format!("Unmounted {name}")));
                                 for pane in win.all_panes() {
                                     if root.as_ref().is_some_and(|r| pane.path().starts_with(r)) {
                                         pane.navigate(glib::home_dir());
                                     }
                                 }
                             }
-                            Err(e) => win.toasts.add_toast(adw::Toast::new(&format!("Eject failed: {e}"))),
+                            Err(e) => win.toasts.add_toast(notify::Toast::new(&format!("Eject failed: {e}"))),
                         }
                     });
                 });
@@ -1147,7 +1148,7 @@ fn win_open(weak: &Weak<Win>, res: Result<PathBuf, String>, server: Option<Strin
             win.pane().navigate(path);
             win.fill_places();
         }
-        Err(e) => win.toasts.add_toast(adw::Toast::new(&format!("Could not open: {e}"))),
+        Err(e) => win.toasts.add_toast(notify::Toast::new(&format!("Could not open: {e}"))),
     }
 
 }
@@ -1161,7 +1162,7 @@ fn make_links(w: &Rc<Win>, hard: bool) {
         }
         Err(e) => format!("Link failed: {e}"),
     };
-    w.toasts.add_toast(adw::Toast::new(&msg));
+    w.toasts.add_toast(notify::Toast::new(&msg));
 }
 
 /// View dropdown: mode, sort, group, hidden files, filter.

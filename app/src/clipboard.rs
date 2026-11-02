@@ -1,5 +1,6 @@
 //! Cut / copy / paste of files through the system clipboard (Nautilus/GNOME format).
 use crate::ops;
+use crate::notify::{self, ToastExt};
 use crate::pane::Pane;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -8,10 +9,10 @@ use std::rc::Rc;
 
 const GNOME: &str = "x-special/gnome-copied-files";
 
-pub fn copy(pane: &Pane, cut: bool, toasts: &adw::ToastOverlay) {
+pub fn copy(pane: &Pane, cut: bool, toasts: &gtk::Overlay) {
     let paths = pane.selected_paths();
     if paths.is_empty() {
-        toasts.add_toast(adw::Toast::new("Nothing selected"));
+        toasts.add_toast(notify::Toast::new("Nothing selected"));
         return;
     }
     let uris: Vec<String> = paths.iter().map(|p| gio::File::for_path(p).uri().to_string()).collect();
@@ -23,16 +24,16 @@ pub fn copy(pane: &Pane, cut: bool, toasts: &adw::ToastOverlay) {
         gdk::ContentProvider::for_value(&text.to_value()),
     ]);
     if pane.root.clipboard().set_content(Some(&provider)).is_ok() {
-        toasts.add_toast(adw::Toast::new(&format!("{} {} item(s)", if cut { "Cut" } else { "Copied" }, paths.len())));
+        toasts.add_toast(notify::Toast::new(&format!("{} {} item(s)", if cut { "Cut" } else { "Copied" }, paths.len())));
     }
 }
 
-pub fn paste(pane: &Rc<Pane>, toasts: &adw::ToastOverlay) {
+pub fn paste(pane: &Rc<Pane>, toasts: &gtk::Overlay) {
     let clip = pane.root.clipboard();
     let dest = pane.path();
     glib::spawn_future_local(glib::clone!(#[weak] toasts, async move {
         let Ok((stream, mime)) = clip.read_future(&[GNOME, "text/uri-list"], glib::Priority::DEFAULT).await else {
-            toasts.add_toast(adw::Toast::new("The clipboard has no files"));
+            toasts.add_toast(notify::Toast::new("The clipboard has no files"));
             return;
         };
         let out = gio::MemoryOutputStream::new_resizable();
@@ -52,8 +53,8 @@ pub fn paste(pane: &Rc<Pane>, toasts: &adw::ToastOverlay) {
 }
 
 /// Start a copy/move job and show its progress in a toast; the result can be undone.
-pub fn run_transfer(toasts: &adw::ToastOverlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool) {
-    let status = adw::Toast::builder().title(if cut { "Moving…" } else { "Copying…" }).timeout(0).build();
+pub fn run_transfer(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool) {
+    let status = notify::Toast::builder().title(if cut { "Moving…" } else { "Copying…" }).timeout(0).build();
     toasts.add_toast(status.clone());
     let rx = ops::transfer(sources, dest, cut);
     let started = std::time::Instant::now();
@@ -70,7 +71,7 @@ pub fn run_transfer(toasts: &adw::ToastOverlay, sources: Vec<PathBuf>, dest: Pat
                         }
                         Err(e) => format!("{} failed: {e}", if cut { "Move" } else { "Copy" }),
                     };
-                    toasts.add_toast(adw::Toast::new(&msg));
+                    toasts.add_toast(notify::Toast::new(&msg));
                     return;
                 }
             }

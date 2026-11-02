@@ -8,6 +8,7 @@ mod git;
 mod icons;
 mod kermius;
 mod model;
+mod notify;
 mod ops;
 mod palette;
 mod pane;
@@ -22,6 +23,7 @@ mod viewprops;
 mod window;
 
 use adw::prelude::*;
+use notify::ToastExt;
 use gtk::{gio, glib};
 
 const APP_ID: &str = "io.github.datlt4.Kolphin";
@@ -103,6 +105,7 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
 .shelf { padding: 12px; background: @kolphin_side; border: 1px solid @kolphin_border; border-radius: 14px; }
 .shelf-list { background: @kolphin_elev; border-radius: 10px; padding: 6px; min-height: 120px; }
+.toast { padding: 8px 8px 8px 16px; border-radius: 12px; background: #262b38; color: #e6e8ee; border: 1px solid #363c4b; box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
 .trash-bar { margin: 0 12px 6px; padding: 6px 6px 6px 12px; border-radius: 9px; background: @kolphin_elev; border: 1px solid @kolphin_border; }
 .pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }
 .pane-close:hover { background: @kolphin_hover_strong; color: #ffffff; }
@@ -150,25 +153,25 @@ fn main() -> glib::ExitCode {
 }
 
 /// Look for a release; `manual` also reports "up to date" and errors.
-pub fn check_update(toasts: &adw::ToastOverlay, manual: bool) {
+pub fn check_update(toasts: &gtk::Overlay, manual: bool) {
     glib::spawn_future_local(glib::clone!(#[weak] toasts, async move {
         let res = gio::spawn_blocking(update::check).await.unwrap_or_else(|_| Err("update check crashed".into()));
         match res {
             Ok(Some(rel)) => offer(&toasts, rel),
-            Ok(None) if manual => toasts.add_toast(adw::Toast::new("Kolphin is up to date")),
-            Err(e) if manual => toasts.add_toast(adw::Toast::new(&format!("Update check failed: {e}"))),
+            Ok(None) if manual => toasts.add_toast(notify::Toast::new("Kolphin is up to date")),
+            Err(e) if manual => toasts.add_toast(notify::Toast::new(&format!("Update check failed: {e}"))),
             _ => {}
         }
     }));
 }
 
-fn offer(toasts: &adw::ToastOverlay, rel: update::Release) {
+fn offer(toasts: &gtk::Overlay, rel: update::Release) {
     let (title, button) = if rel.fresh_install {
         (format!("Install Kolphin {} system-wide?", rel.version), "Install")
     } else {
         (format!("Kolphin {} is available", rel.version), "Update")
     };
-    let toast = adw::Toast::builder()
+    let toast = notify::Toast::builder()
         .title(&title)
         .button_label(button)
         .action_name("win.install-update")
@@ -179,8 +182,8 @@ fn offer(toasts: &adw::ToastOverlay, rel: update::Release) {
 }
 
 /// Download with progress, install via pkexec, then restart into the installed build.
-pub fn install(toasts: &adw::ToastOverlay, url: String) {
-    let status = adw::Toast::builder().title("Downloading…").timeout(0).build();
+pub fn install(toasts: &gtk::Overlay, url: String) {
+    let status = notify::Toast::builder().title("Downloading…").timeout(0).build();
     toasts.add_toast(status.clone());
     let (tx, rx) = async_channel::unbounded::<u32>();
     glib::spawn_future_local(glib::clone!(#[weak] toasts, #[strong] status, async move {
@@ -202,7 +205,7 @@ pub fn install(toasts: &adw::ToastOverlay, url: String) {
                     app.quit();
                 }
             }
-            Err(e) => toasts.add_toast(adw::Toast::new(&format!("Install failed: {e}"))),
+            Err(e) => toasts.add_toast(notify::Toast::new(&format!("Install failed: {e}"))),
         }
     }));
 }
