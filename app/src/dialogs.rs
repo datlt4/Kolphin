@@ -2,13 +2,36 @@
 use crate::icons;
 use gtk::{glib, prelude::*};
 
-/// GTK 4.6 + an input method (Unikey via ibus or XIM) puts the first letter typed over a selection at the end
-/// ("abc" → "bc a"). Delete the selection ourselves before the key reaches the input method.
+/// Work around GTK 4.6 + input method (Unikey via ibus or XIM) bugs: the first letter typed over a selection lands
+/// at the end ("abc" → "bc a"), and Enter commits the pending word twice.
 pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let e = entry.clone().upcast::<gtk::Editable>();
+    let w = entry.clone().upcast::<gtk::Widget>();
     keys.connect_key_pressed(move |_, key, _, state| {
+        // Enter: the input method commits its pending word once on focus-out; the key itself would commit it a
+        // second time ("abc" → "abcabc"). Keep Enter from it, let focus-out commit, then activate.
+        if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter) {
+            if let Some(root) = w.root() {
+                root.set_focus(None::<&gtk::Widget>);
+            }
+            let w = w.clone();
+            glib::idle_add_local_once(move || {
+                w.grab_focus();
+                if let Some(en) = w.downcast_ref::<gtk::Entry>() {
+                    en.emit_activate();
+                    if en.activates_default() {
+                        if let Some(d) = en.root().and_downcast::<gtk::Window>().and_then(|win| win.default_widget()) {
+                            d.activate();
+                        }
+                    }
+                } else if let Some(se) = w.downcast_ref::<gtk::SearchEntry>() {
+                    se.emit_activate();
+                }
+            });
+            return glib::Propagation::Stop;
+        }
         let modifier = state.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK);
         if !modifier && key.to_unicode().is_some_and(|c| !c.is_control()) && e.selection_bounds().is_some() {
             e.delete_selection();
