@@ -24,6 +24,8 @@ pub struct Pane {
     pub root: gtk::Box,
     pub pathbar: Rc<PathBar>,
     pub canvas: Canvas,
+    vscroll: gtk::Scrollbar,
+    hscroll: gtk::Scrollbar,
     status: gtk::Label,
     path: RefCell<PathBuf>,
     back: RefCell<Vec<PathBuf>>,
@@ -42,22 +44,35 @@ impl Pane {
     pub fn new(path: PathBuf, mode: ViewMode, show_hidden: bool) -> Rc<Self> {
         let pathbar = PathBar::new();
         let canvas = Canvas::default();
-        canvas.set_mode(mode);
         canvas.reset(show_hidden);
-        let scrollbar = gtk::Scrollbar::new(gtk::Orientation::Vertical, Some(&canvas.adjustment()));
+        let vscroll = gtk::Scrollbar::new(gtk::Orientation::Vertical, Some(&canvas.adjustment()));
+        let hscroll = gtk::Scrollbar::new(gtk::Orientation::Horizontal, Some(&canvas.hadjustment()));
+        // Show a scrollbar only when there is something to scroll.
+        for bar in [&vscroll, &hscroll] {
+            let adj = bar.adjustment();
+            let bar = bar.downgrade();
+            adj.connect_changed(move |a| {
+                if let Some(bar) = bar.upgrade() {
+                    bar.set_opacity(if a.upper() > a.page_size() + 0.5 { 1.0 } else { 0.0 });
+                }
+            });
+        }
         let view = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         view.append(&canvas);
-        view.append(&scrollbar);
+        view.append(&vscroll);
         let status = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["statusbar"]).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&pathbar.root);
         root.append(&view);
+        root.append(&hscroll);
         root.append(&status);
 
         let pane = Rc::new(Pane {
             root,
             pathbar,
             canvas,
+            vscroll,
+            hscroll,
             status,
             path: RefCell::new(path),
             back: Default::default(),
@@ -96,8 +111,16 @@ impl Pane {
             }
         }));
         pane.root.add_controller(focus);
+        pane.set_mode(mode);
         pane.load();
         pane
+    }
+
+    pub fn set_mode(&self, mode: ViewMode) {
+        let compact = mode == ViewMode::Compact;
+        self.vscroll.set_visible(!compact);
+        self.hscroll.set_visible(compact);
+        self.canvas.set_mode(mode);
     }
 
     pub fn path(&self) -> PathBuf {

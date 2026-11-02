@@ -19,7 +19,8 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 
 ### M1 — Duyệt file cơ bản ✅
 > Đo trên SSD, 1 triệu file: tên hiện sau 41 ms, list xong 0,7 s, stat xong 1,8 s, RSS 279 MB; vẽ mỗi frame < 1 ms. Renderer mặc định cairo (GL của GTK 4.6 rớt frame trên NVIDIA/X11).
-- Canvas ảo hoá: 3 chế độ Icons / Compact / Details; cuộn mượt (wheel có animation, touchpad kinetic).
+> HDD (dataset thật): 46k file → tên sau 39 ms, stat xong 0,96 s; 26k ảnh → stat xong 2,2 s; cuộn ~75 fps.
+- Canvas ảo hoá: 3 chế độ Icons / Compact (cuộn ngang như Dolphin) / Details; cuộn mượt (wheel có animation, touchpad kinetic).
 - Đọc thư mục theo luồng nền: tên hiện ngay theo lô, `stat` (size/mtime) điền dần sau; sort tự nhiên (`img_2` < `img_10`), folder trước.
 - Chọn: click, Ctrl/Shift+click, kéo khung, bàn phím (mũi tên, Home/End, PgUp/PgDn, Ctrl+A), gõ tên để nhảy tới file.
 - Tabs (Ctrl+T/W), split view (F3), back/forward/up, ẩn/hiện file ẩn (Ctrl+H), F5 reload.
@@ -28,6 +29,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - Status bar: số folder/file, dung lượng, phần đang chọn.
 - Theo dõi thay đổi (inotify qua GIO), gom sự kiện rồi cập nhật tăng dần.
 - Icon Material theo tên/đuôi file, render SVG bằng resvg, cache theo cỡ.
+- Theme tối xanh navy + accent `#5b8cff` giống Kermius/Kellyfin; sidebar có logo + phiên bản.
 - Benchmark: `tools/mkbench.py` tạo thư mục 1 triệu file; `KOLPHIN_BENCH=1` đo thời gian load + thời gian vẽ khi cuộn.
 
 ### M2 — Thumbnail

@@ -32,11 +32,34 @@ const TYPE_W: f64 = 160.0;
 
 #[derive(Clone, Copy)]
 struct Geometry {
+    /// Columns per row (vertical modes).
     cols: usize,
+    /// Items per column (Compact, which scrolls horizontally like Dolphin).
+    rows: usize,
+    horizontal: bool,
     cell_w: f64,
     cell_h: f64,
     icon: f64,
     top: f64,
+}
+
+impl Geometry {
+    /// Content-space top-left corner of the item at position `p`.
+    fn origin(&self, p: usize) -> (f64, f64) {
+        if self.horizontal {
+            ((p / self.rows) as f64 * self.cell_w, (p % self.rows) as f64 * self.cell_h)
+        } else {
+            ((p % self.cols) as f64 * self.cell_w, self.top + (p / self.cols) as f64 * self.cell_h)
+        }
+    }
+
+    fn at(&self, col: usize, row: usize) -> usize {
+        if self.horizontal {
+            col * self.rows + row
+        } else {
+            row * self.cols + col
+        }
+    }
 }
 
 struct Text {
@@ -59,6 +82,7 @@ mod imp {
         pub mode: Cell<ViewMode>,
         pub zoom: Cell<f64>,
         pub vadj: gtk::Adjustment,
+        pub hadj: gtk::Adjustment,
         pub cursor: Cell<Option<u32>>,
         pub anchor: Cell<Option<u32>>,
         pub hover: Cell<Option<u32>>,
@@ -83,6 +107,7 @@ mod imp {
                 mode: Default::default(),
                 zoom: Cell::new(64.0),
                 vadj: gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 1.0, 0.0),
+                hadj: gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 1.0, 0.0),
                 cursor: Default::default(),
                 anchor: Default::default(),
                 hover: Default::default(),
@@ -149,6 +174,26 @@ impl Canvas {
         self.imp().vadj.clone()
     }
 
+    pub fn hadjustment(&self) -> gtk::Adjustment {
+        self.imp().hadj.clone()
+    }
+
+    /// The adjustment of the current scroll axis.
+    fn scroll_adj(&self) -> &gtk::Adjustment {
+        let imp = self.imp();
+        if self.mode() == ViewMode::Compact {
+            &imp.hadj
+        } else {
+            &imp.vadj
+        }
+    }
+
+    /// Scroll offset (x, y) of the content.
+    fn offset(&self) -> (f64, f64) {
+        let imp = self.imp();
+        (imp.hadj.value(), imp.vadj.value())
+    }
+
     pub fn connect_action(&self, f: impl Fn(Action) + 'static) {
         *self.imp().on_action.borrow_mut() = Some(Box::new(f));
     }
@@ -181,6 +226,7 @@ impl Canvas {
         imp.hover.set(None);
         self.stop_animation();
         imp.vadj.set_value(0.0);
+        imp.hadj.set_value(0.0);
         self.update(|_| {});
     }
 
@@ -253,27 +299,29 @@ impl Canvas {
             ViewMode::Icons => {
                 let icon = self.imp().zoom.get();
                 let cols = ((w / (icon + 48.0).max(104.0)) as usize).max(1);
-                Geometry { cols, cell_w: w / cols as f64, cell_h: icon + 2.0 * self.line_height() + 28.0, icon, top: 0.0 }
+                let cell_h = icon + 2.0 * self.line_height() + 28.0;
+                Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, icon, top: 0.0 }
             }
             ViewMode::Compact => {
-                let cols = ((w / 260.0) as usize).max(1);
-                Geometry { cols, cell_w: w / cols as f64, cell_h: 32.0, icon: 22.0, top: 0.0 }
+                let rows = (((self.height() as f64 - 8.0) / 30.0) as usize).max(1);
+                Geometry { cols: 0, rows, horizontal: true, cell_w: 280.0, cell_h: 30.0, icon: 22.0, top: 0.0 }
             }
-            ViewMode::Details => Geometry { cols: 1, cell_w: w, cell_h: 30.0, icon: 22.0, top: HEADER_H },
+            ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: 30.0, icon: 22.0, top: HEADER_H },
         }
-    }
-
-    fn content_height(&self, g: &Geometry) -> f64 {
-        let n = self.model().order.len();
-        g.top + n.div_ceil(g.cols) as f64 * g.cell_h + 8.0
     }
 
     fn update_adjustment(&self) {
         let g = self.geometry();
-        let (h, upper) = (self.height() as f64, self.content_height(&g));
-        let adj = &self.imp().vadj;
-        let value = adj.value().clamp(0.0, (upper - h).max(0.0));
-        adj.configure(value, 0.0, upper, g.cell_h, h * 0.9, h);
+        let n = self.model().order.len();
+        let imp = self.imp();
+        let (adj, other, page, upper, step) = if g.horizontal {
+            (&imp.hadj, &imp.vadj, self.width() as f64, n.div_ceil(g.rows) as f64 * g.cell_w, g.cell_w)
+        } else {
+            (&imp.vadj, &imp.hadj, self.height() as f64, g.top + n.div_ceil(g.cols) as f64 * g.cell_h + 8.0, g.cell_h)
+        };
+        let value = adj.value().clamp(0.0, (upper - page).max(0.0));
+        adj.configure(value, 0.0, upper, step, page * 0.9, page);
+        other.configure(0.0, 0.0, 0.0, 1.0, 1.0, 0.0);
     }
 
     /// Position (in `order`) under widget point (x, y).
@@ -282,10 +330,14 @@ impl Canvas {
         if y < g.top || x < 0.0 {
             return None;
         }
-        let cy = y + self.imp().vadj.value() - g.top;
-        let (row, col) = ((cy / g.cell_h) as usize, (x / g.cell_w) as usize);
-        let p = row * g.cols + col;
-        (col < g.cols && cy >= 0.0 && p < self.model().order.len()).then_some(p)
+        let (sx, sy) = self.offset();
+        let (cx, cy) = (x + sx, y + sy - g.top);
+        let (col, row) = ((cx / g.cell_w) as usize, (cy / g.cell_h) as usize);
+        if (g.horizontal && row >= g.rows) || (!g.horizontal && col >= g.cols) {
+            return None;
+        }
+        let p = g.at(col, row);
+        (p < self.model().order.len()).then_some(p)
     }
 
     fn cursor_pos(&self) -> Option<usize> {
@@ -295,14 +347,19 @@ impl Canvas {
 
     fn ensure_visible(&self, p: usize) {
         let g = self.geometry();
-        let adj = &self.imp().vadj;
-        let (y, h) = ((p / g.cols) as f64 * g.cell_h, self.height() as f64 - g.top);
-        let v = adj.value();
+        let (x, y) = g.origin(p);
+        let (start, size, view) = if g.horizontal {
+            (x, g.cell_w, self.width() as f64)
+        } else {
+            (y - g.top, g.cell_h, self.height() as f64 - g.top)
+        };
         self.stop_animation();
-        if y < v {
-            adj.set_value(y);
-        } else if y + g.cell_h > v + h {
-            adj.set_value(y + g.cell_h - h);
+        let adj = self.scroll_adj();
+        let v = adj.value();
+        if start < v {
+            adj.set_value(start);
+        } else if start + size > v + view {
+            adj.set_value(start + size - view);
         }
     }
 
@@ -312,7 +369,7 @@ impl Canvas {
         let imp = self.imp();
         let width = match self.mode() {
             ViewMode::Icons => g.cell_w - 8.0,
-            ViewMode::Compact => g.cell_w - g.icon - 24.0,
+            ViewMode::Compact => g.cell_w - g.icon - 32.0,
             ViewMode::Details => details_name_w,
         };
         if imp.text_width.get() != width {
@@ -366,10 +423,12 @@ impl Canvas {
         let imp = self.imp();
         let (w, h) = (self.width() as f64, self.height() as f64);
         let g = self.geometry();
-        let scroll = imp.vadj.value();
+        let (sx, sy) = self.offset();
         let style = self.style_context();
         let fg = style.color();
-        let accent = style.lookup_color("accent_bg_color").unwrap_or(gdk::RGBA::new(0.21, 0.52, 0.89, 1.0));
+        let accent = style.lookup_color("accent_bg_color").unwrap_or(gdk::RGBA::new(0.36, 0.55, 1.0, 1.0));
+        let muted = style.lookup_color("kolphin_muted").unwrap_or(fg);
+        let hover = style.lookup_color("kolphin_hover").unwrap_or(gdk::RGBA::new(0.13, 0.15, 0.2, 1.0));
         let alpha = |c: &gdk::RGBA, a: f32| gdk::RGBA::new(c.red(), c.green(), c.blue(), c.alpha() * a);
         let rect = |x: f64, y: f64, w: f64, h: f64| graphene::Rect::new(x as f32, y as f32, w as f32, h as f32);
         let scale = self.scale_factor() as f64;
@@ -378,13 +437,16 @@ impl Canvas {
         let type_x = w - TYPE_W - 8.0;
         let date_x = type_x - DATE_W;
         let size_x = date_x - SIZE_W;
-        let name_x = 6.0 + g.icon + 8.0;
+        let name_x = 12.0 + g.icon + 8.0;
         let name_w = (size_x - name_x - 8.0).max(40.0);
 
         snap.push_clip(&rect(0.0, 0.0, w, h));
         let len = self.model().order.len();
-        let first = ((scroll / g.cell_h) as usize) * g.cols;
-        let last = (((scroll + h) / g.cell_h).ceil() as usize + 1) * g.cols;
+        let (first, last) = if g.horizontal {
+            (((sx / g.cell_w) as usize) * g.rows, (((sx + w) / g.cell_w).ceil() as usize + 1) * g.rows)
+        } else {
+            (((sy / g.cell_h) as usize) * g.cols, (((sy + h) / g.cell_h).ceil() as usize + 1) * g.cols)
+        };
         let focus = self.has_focus();
         for p in first..last.min(len) {
             let (idx, selected, icon) = {
@@ -393,8 +455,8 @@ impl Canvas {
                 let e = &m.entries[idx as usize];
                 (idx, m.selected[idx as usize], icons::icon_name(&e.name.to_string_lossy(), e.is_dir))
             };
-            let x = (p % g.cols) as f64 * g.cell_w;
-            let y = g.top + (p / g.cols) as f64 * g.cell_h - scroll;
+            let (ox, oy) = g.origin(p);
+            let (x, y) = (ox - sx, oy - sy);
             let (bx, by, bw, bh, radius) = match self.mode() {
                 ViewMode::Icons => (x + 4.0, y + 4.0, g.cell_w - 8.0, g.cell_h - 8.0, 8.0),
                 _ => (x + 2.0, y + 1.0, g.cell_w - 4.0, g.cell_h - 2.0, 6.0),
@@ -402,11 +464,13 @@ impl Canvas {
             let shape = gsk::RoundedRect::from_rect(rect(bx, by, bw, bh), radius);
             if selected {
                 snap.push_rounded_clip(&shape);
-                snap.append_color(&alpha(&accent, 0.35), &rect(bx, by, bw, bh));
+                snap.append_color(&alpha(&accent, 0.2), &rect(bx, by, bw, bh));
                 snap.pop();
+                let c = alpha(&accent, 0.45);
+                snap.append_border(&shape, &[1.0; 4], &[c, c, c, c]);
             } else if imp.hover.get() == Some(idx) {
                 snap.push_rounded_clip(&shape);
-                snap.append_color(&alpha(&fg, 0.07), &rect(bx, by, bw, bh));
+                snap.append_color(&hover, &rect(bx, by, bw, bh));
                 snap.pop();
             }
             if focus && imp.cursor.get() == Some(idx) {
@@ -416,7 +480,7 @@ impl Canvas {
 
             let (ix, iy) = match self.mode() {
                 ViewMode::Icons => (x + (g.cell_w - g.icon) / 2.0, y + 10.0),
-                _ => (x + 6.0, y + (g.cell_h - g.icon) / 2.0),
+                _ => (x + 12.0, y + (g.cell_h - g.icon) / 2.0),
             };
             if let Some(tex) = icons::texture(icon, (g.icon * scale).round() as u32) {
                 snap.append_texture(&tex, &rect(ix, iy, g.icon, g.icon));
@@ -426,7 +490,7 @@ impl Canvas {
             let th = text.name.pixel_size().1 as f64;
             let (tx, ty) = match self.mode() {
                 ViewMode::Icons => (x + 4.0, y + 10.0 + g.icon + 6.0),
-                ViewMode::Compact => (x + 6.0 + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
+                ViewMode::Compact => (x + 12.0 + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
                 ViewMode::Details => (name_x, y + (g.cell_h - th) / 2.0),
             };
             snap.save();
@@ -434,7 +498,7 @@ impl Canvas {
             snap.append_layout(&text.name, &fg);
             snap.restore();
             if let Some(cols) = &text.columns {
-                let dim = alpha(&fg, 0.65);
+                let dim = muted;
                 for (layout, cx) in cols.iter().zip([size_x, date_x + 12.0, type_x + 8.0]) {
                     snap.save();
                     snap.translate(&graphene::Point::new(cx as f32, ty as f32));
@@ -447,23 +511,24 @@ impl Canvas {
         if self.mode() == ViewMode::Details {
             let bg = style.lookup_color("view_bg_color").unwrap_or(gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
             snap.append_color(&bg, &rect(0.0, 0.0, w, HEADER_H));
-            snap.append_color(&alpha(&fg, 0.12), &rect(0.0, HEADER_H - 1.0, w, 1.0));
-            let dim = alpha(&fg, 0.7);
-            for (title, x) in [("Name", name_x), ("Size", size_x), ("Modified", date_x + 12.0), ("Type", type_x + 8.0)] {
-                let l = self.create_pango_layout(Some(title));
-                if title == "Size" {
+            let border = style.lookup_color("kolphin_border").unwrap_or(alpha(&fg, 0.12));
+            snap.append_color(&border, &rect(0.0, HEADER_H - 1.0, w, 1.0));
+            for (title, x) in [("NAME", name_x), ("SIZE", size_x), ("MODIFIED", date_x + 12.0), ("TYPE", type_x + 8.0)] {
+                let l = self.create_pango_layout(None);
+                l.set_markup(&format!("<span size='small' weight='600' letter_spacing='800'>{title}</span>"));
+                if title == "SIZE" {
                     l.set_width(((SIZE_W - 12.0) * pango::SCALE as f64) as i32);
                     l.set_alignment(pango::Alignment::Right);
                 }
                 snap.save();
                 snap.translate(&graphene::Point::new(x as f32, ((HEADER_H - l.pixel_size().1 as f64) / 2.0) as f32));
-                snap.append_layout(&l, &dim);
+                snap.append_layout(&l, &muted);
                 snap.restore();
             }
         }
 
         if let Some(b) = imp.band.borrow().as_ref() {
-            let (x0, y0) = (b.start.0.min(b.cur.0), b.start.1.min(b.cur.1) - scroll);
+            let (x0, y0) = (b.start.0.min(b.cur.0) - sx, b.start.1.min(b.cur.1) - sy);
             let r = rect(x0, y0, (b.start.0 - b.cur.0).abs(), (b.start.1 - b.cur.1).abs());
             snap.append_color(&alpha(&accent, 0.18), &r);
             let c = alpha(&accent, 0.8);
@@ -481,18 +546,20 @@ impl Canvas {
         self.set_vexpand(true);
         let imp = self.imp();
         imp.vadj.connect_value_changed(glib::clone!(#[weak(rename_to = c)] self, move |_| c.queue_draw()));
+        imp.hadj.connect_value_changed(glib::clone!(#[weak(rename_to = c)] self, move |_| c.queue_draw()));
 
-        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC);
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES | gtk::EventControllerScrollFlags::KINETIC);
         scroll.connect_scroll(glib::clone!(
             #[weak(rename_to = c)]
             self,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |ctl, _, dy| c.on_scroll(ctl, dy)
+            move |ctl, dx, dy| c.on_scroll(ctl, dx, dy)
         ));
-        scroll.connect_decelerate(glib::clone!(#[weak(rename_to = c)] self, move |_, _, vy| {
-            let unit = c.imp().vadj.page_size().powf(2.0 / 3.0);
-            c.imp().velocity.set(vy * unit);
+        scroll.connect_decelerate(glib::clone!(#[weak(rename_to = c)] self, move |_, vx, vy| {
+            let unit = c.scroll_adj().page_size().powf(2.0 / 3.0);
+            let v = if c.mode() == ViewMode::Compact { vx + vy } else { vy };
+            c.imp().velocity.set(v * unit);
             c.start_animation();
         }));
         scroll.connect_scroll_begin(glib::clone!(#[weak(rename_to = c)] self, move |_| c.stop_animation()));
@@ -513,7 +580,8 @@ impl Canvas {
             if c.hit(x, y).is_none() {
                 let ctrl = g.current_event_state().contains(gdk::ModifierType::CONTROL_MASK);
                 let base = if ctrl { c.model().selected.clone() } else { vec![false; c.model().selected.len()] };
-                let p = (x, y + c.imp().vadj.value());
+                let (sx, sy) = c.offset();
+                let p = (x + sx, y + sy);
                 *c.imp().band.borrow_mut() = Some(Band { start: p, cur: p, base });
             }
         }));
@@ -524,12 +592,14 @@ impl Canvas {
             c.imp().pending_select.set(None);
             let (sx, sy) = g.start_point().unwrap_or_default();
             let (x, y) = (sx + ox, sy + oy);
-            let adj = c.adjustment();
-            let h = c.height() as f64;
-            if y < 0.0 || y > h {
-                adj.set_value(adj.value() + if y < 0.0 { y } else { y - h } * 0.5);
+            // Auto-scroll while the pointer is past the edge along the scroll axis.
+            let (pos, len) = if c.mode() == ViewMode::Compact { (x, c.width() as f64) } else { (y, c.height() as f64) };
+            if pos < 0.0 || pos > len {
+                let adj = c.scroll_adj();
+                adj.set_value(adj.value() + if pos < 0.0 { pos } else { pos - len } * 0.5);
             }
-            c.update_band((x.clamp(0.0, c.width() as f64), y + adj.value()));
+            let (ox, oy) = c.offset();
+            c.update_band(((x + ox).max(0.0), (y + oy).max(0.0)));
         }));
         drag.connect_drag_end(glib::clone!(#[weak(rename_to = c)] self, move |_, _, _| {
             if c.imp().band.take().is_some() {
@@ -568,15 +638,17 @@ impl Canvas {
         self.add_controller(focus);
     }
 
-    fn on_scroll(&self, ctl: &gtk::EventControllerScroll, dy: f64) -> glib::Propagation {
+    fn on_scroll(&self, ctl: &gtk::EventControllerScroll, dx: f64, dy: f64) -> glib::Propagation {
         if ctl.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
             if self.mode() == ViewMode::Icons {
                 self.zoom_by(if dy < 0.0 { 1.15 } else { 1.0 / 1.15 });
             }
             return glib::Propagation::Stop;
         }
-        let adj = &self.imp().vadj;
-        let delta = dy * adj.page_size().powf(2.0 / 3.0);
+        let adj = self.scroll_adj();
+        // Compact scrolls sideways: the vertical wheel moves it too.
+        let d = if self.mode() == ViewMode::Compact { dx + dy } else { dy };
+        let delta = d * adj.page_size().powf(2.0 / 3.0);
         let wheel = ctl.current_event_device().is_some_and(|d| d.source() == gdk::InputSource::Mouse);
         if wheel {
             // Mouse wheel: glide to the target instead of jumping.
@@ -603,7 +675,7 @@ impl Canvas {
             let now = clock.frame_time();
             let dt = if imp.last_frame.get() == 0 { 1.0 / 60.0 } else { ((now - imp.last_frame.get()) as f64 / 1e6).min(0.05) };
             imp.last_frame.set(now);
-            let adj = &imp.vadj;
+            let adj = c.scroll_adj();
             let mut moving = false;
             if let Some(target) = imp.target.get() {
                 let v = adj.value();
@@ -705,11 +777,16 @@ impl Canvas {
         let mut m = imp.model.borrow_mut();
         m.selected.copy_from_slice(&b.base);
         if y1 >= 0.0 {
-            let (c0, c1) = ((x0 / g.cell_w) as usize, ((x1 / g.cell_w) as usize).min(g.cols - 1));
-            for row in (y0 / g.cell_h) as usize..=(y1 / g.cell_h) as usize {
+            let (c0, mut c1) = ((x0 / g.cell_w) as usize, (x1 / g.cell_w) as usize);
+            let (r0, mut r1) = ((y0 / g.cell_h) as usize, (y1 / g.cell_h) as usize);
+            if g.horizontal {
+                r1 = r1.min(g.rows - 1);
+            } else {
+                c1 = c1.min(g.cols - 1);
+            }
+            for row in r0..=r1 {
                 for col in c0..=c1 {
-                    let p = row * g.cols + col;
-                    if let Some(&i) = m.order.get(p) {
+                    if let Some(&i) = m.order.get(g.at(col, row)) {
                         m.selected[i as usize] = true;
                     }
                 }
@@ -726,7 +803,12 @@ impl Canvas {
         let (ctrl, shift) = (state.contains(gdk::ModifierType::CONTROL_MASK), state.contains(gdk::ModifierType::SHIFT_MASK));
         let len = self.model().order.len();
         let g = self.geometry();
-        let per_page = (((self.height() as f64 - g.top) / g.cell_h) as usize).max(1) * g.cols;
+        // Steps for (left/right, up/down, page) in positions.
+        let (side, vert, per_page) = if g.horizontal {
+            (g.rows, 1, ((self.width() as f64 / g.cell_w) as usize).max(1) * g.rows)
+        } else {
+            (1, g.cols, (((self.height() as f64 - g.top) / g.cell_h) as usize).max(1) * g.cols)
+        };
         let grid = self.mode() != ViewMode::Details;
         let cur = self.cursor_pos();
         let target = |delta: isize| -> Option<usize> {
@@ -737,10 +819,10 @@ impl Canvas {
             Some(p)
         };
         let moved = match key {
-            gdk::Key::Up => target(-(g.cols as isize)),
-            gdk::Key::Down => target(g.cols as isize),
-            gdk::Key::Left if grid => target(-1),
-            gdk::Key::Right if grid => target(1),
+            gdk::Key::Up => target(-(vert as isize)),
+            gdk::Key::Down => target(vert as isize),
+            gdk::Key::Left if grid => target(-(side as isize)),
+            gdk::Key::Right if grid => target(side as isize),
             gdk::Key::Page_Up => target(-(per_page as isize)),
             gdk::Key::Page_Down => target(per_page as isize),
             gdk::Key::Home => (len > 0).then_some(0),

@@ -28,7 +28,7 @@ pub struct Win {
     tab_list: RefCell<Vec<Rc<Tab>>>,
     show_hidden: Cell<bool>,
     places: gtk::ListBox,
-    place_paths: RefCell<Vec<PathBuf>>,
+    place_paths: RefCell<Vec<Option<PathBuf>>>,
 }
 
 thread_local! {
@@ -83,7 +83,7 @@ fn mode_name(m: ViewMode) -> &'static str {
 
 impl Win {
     fn new(app: &adw::Application) -> Rc<Self> {
-        let header = adw::HeaderBar::new();
+        let header = adw::HeaderBar::builder().show_start_title_buttons(false).build();
         for (icon, action, tip) in [("go-previous-symbolic", "win.back", "Back"), ("go-next-symbolic", "win.forward", "Forward"), ("go-up-symbolic", "win.up", "Up")] {
             header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
         }
@@ -113,14 +113,32 @@ impl Win {
         main.append(&tabs);
         tabs.set_vexpand(true);
 
-        let places = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
-        let sidebar = gtk::ScrolledWindow::builder().child(&places).hscrollbar_policy(gtk::PolicyType::Never).width_request(180).build();
-        let split = gtk::Paned::builder().start_child(&sidebar).end_child(&main).position(200).shrink_start_child(false).build();
-        split.set_vexpand(true);
+        let main_col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main_col.append(&header);
+        main_col.append(&main);
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&header);
-        content.append(&split);
+        // Sidebar like Kermius: brand, places/devices, version at the bottom.
+        let brand = gtk::Box::builder().spacing(10).css_classes(["brand"]).build();
+        let logo = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("../../assets/icons/kolphin-128.png"))).ok();
+        brand.append(&gtk::Image::builder().pixel_size(28).build());
+        if let (Some(img), Some(logo)) = (brand.first_child().and_downcast::<gtk::Image>(), logo) {
+            img.set_paintable(Some(&logo));
+        }
+        brand.append(&gtk::Label::new(Some("Kolphin")));
+        let side_header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).title_widget(&brand).build();
+        side_header.set_centering_policy(adw::CenteringPolicy::Loose);
+        let places = gtk::ListBox::builder().css_classes(["places"]).build();
+        let side_scroll = gtk::ScrolledWindow::builder().child(&places).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
+        let version = gtk::Label::builder().label(format!("v{}", env!("CARGO_PKG_VERSION"))).xalign(0.0).css_classes(["side-foot"]).build();
+        let sidebar = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["sidebar-pane"]).width_request(200).build();
+        sidebar.append(&side_header);
+        sidebar.append(&side_scroll);
+        sidebar.append(&version);
+
+        let content = gtk::Paned::builder().start_child(&sidebar).end_child(&main_col).position(230).shrink_start_child(false).build();
+        content.add_css_class("root-split");
+        content.set_wide_handle(false);
+        content.set_vexpand(true);
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&content));
         let window = adw::ApplicationWindow::builder()
@@ -352,7 +370,7 @@ impl Win {
                 "details" => ViewMode::Details,
                 _ => ViewMode::Icons,
             };
-            win.pane().canvas.set_mode(m);
+            win.pane().set_mode(m);
             a.set_state(&name.to_variant());
         });
         self.window.add_action(&mode);
@@ -371,7 +389,7 @@ impl Win {
         let w = self.weak();
         self.places.connect_row_activated(move |_, row| {
             let Some(win) = w.upgrade() else { return };
-            let path = win.place_paths.borrow().get(row.index() as usize).cloned();
+            let path = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
             if let Some(path) = path {
                 win.pane().navigate(path);
             }
@@ -393,14 +411,20 @@ impl Win {
         while let Some(row) = self.places.row_at_index(0) {
             self.places.remove(&row);
         }
-        let mut paths = Vec::new();
-        let mut add = |icon: gio::Icon, label: &str, path: PathBuf| {
-            let row = gtk::Box::builder().spacing(10).margin_start(6).margin_top(2).margin_bottom(2).build();
+        let paths = RefCell::new(Vec::new());
+        let title = |text: &str| {
+            let label = gtk::Label::builder().label(text).xalign(0.0).build();
+            self.places.append(&gtk::ListBoxRow::builder().child(&label).selectable(false).activatable(false).css_classes(["side-title"]).build());
+            paths.borrow_mut().push(None);
+        };
+        let add = |icon: gio::Icon, label: &str, path: PathBuf| {
+            let row = gtk::Box::builder().spacing(11).build();
             row.append(&gtk::Image::from_gicon(&icon));
             row.append(&gtk::Label::builder().label(label).ellipsize(gtk::pango::EllipsizeMode::End).build());
             self.places.append(&row);
-            paths.push(path);
+            paths.borrow_mut().push(Some(path));
         };
+        title("PLACES");
         let themed = |name: &str| gio::ThemedIcon::new(name).upcast::<gio::Icon>();
         add(themed("user-home-symbolic"), "Home", glib::home_dir());
         for (dir, icon) in [
@@ -415,13 +439,14 @@ impl Win {
                 add(themed(icon), &folder_name(&p), p);
             }
         }
+        title("DEVICES");
         add(themed("drive-harddisk-symbolic"), "Root", PathBuf::from("/"));
         for mount in gio::VolumeMonitor::get().mounts() {
             if let Some(path) = mount.root().path() {
                 add(mount.symbolic_icon(), &mount.name(), path);
             }
         }
-        *self.place_paths.borrow_mut() = paths;
+        *self.place_paths.borrow_mut() = paths.into_inner();
     }
 }
 
