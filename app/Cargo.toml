@@ -1,0 +1,25 @@
+[package]
+name = "kolphin"
+description = "Koi's Dolphin: a fast file manager for Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_6"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_1"] }
+async-channel = "2"
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+
+[package.metadata.deb]
+name = "kolphin"
+maintainer = "datlt4 <dat@vizgard.com>"
+section = "utils"
+depends = "$auto"
+assets = [
+    ["target/release/kolphin", "usr/bin/", "755"],
+    ["../assets/kolphin.desktop", "usr/share/applications/", "644"],
+    ["../assets/kolphin.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]

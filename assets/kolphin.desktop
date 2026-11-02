@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kolphin
+GenericName=File Manager
+Comment=Koi's Dolphin: a fast file manager
+Exec=kolphin %U
+Icon=kolphin
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+StartupWMClass=io.github.datlt4.Kolphin

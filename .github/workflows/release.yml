@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag must match Cargo version (the updater compares against it)
+        run: |
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+          test "${GITHUB_REF_NAME#v}" = "$CARGO_VERSION" || { echo "tag $GITHUB_REF_NAME != Cargo $CARGO_VERSION"; exit 1; }
+      - run: cargo install cargo-deb --locked
+      - name: Build .deb and tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo deb -p kolphin --deb-version "$VERSION" -o "kolphin_${VERSION}_${{ matrix.arch }}.deb"
+          mkdir -p "kolphin-$VERSION"
+          cp target/release/kolphin assets/kolphin.desktop assets/kolphin.svg "kolphin-$VERSION/"
+          tar czf "kolphin_${VERSION}_linux_${{ matrix.arch }}.tar.gz" "kolphin-$VERSION"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kolphin_*.deb
+            kolphin_*.tar.gz
