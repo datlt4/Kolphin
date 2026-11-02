@@ -48,6 +48,7 @@ pub fn fuzzy(query: &str, text: &str) -> bool {
 
 pub fn show(parent: &gtk::ApplicationWindow) {
     let search = gtk::SearchEntry::builder().placeholder_text("Type a command…").build();
+    crate::dialogs::ime_safe(&search);
     let list = gtk::ListBox::builder().css_classes(["palette"]).build();
     let mut entries: Vec<(String, String, String, Option<glib::Variant>)> =
         COMMANDS.iter().map(|(l, k, a, t)| (l.to_string(), k.to_string(), a.to_string(), t.map(|t| t.to_variant()))).collect();

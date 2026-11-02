@@ -26,6 +26,7 @@ impl PathBar {
             .hexpand(true)
             .build();
         let entry = gtk::Entry::builder().hexpand(true).build();
+        crate::dialogs::ime_safe(&entry);
         let root = gtk::Stack::builder().hhomogeneous(false).vhomogeneous(true).build();
         root.add_css_class("pathbar");
         root.add_named(&scroller, Some("crumbs"));

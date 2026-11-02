@@ -2,6 +2,22 @@
 use crate::icons;
 use gtk::{glib, prelude::*};
 
+/// GTK 4.6 + an input method (Unikey via ibus or XIM) puts the first letter typed over a selection at the end
+/// ("abc" → "bc a"). Delete the selection ourselves before the key reaches the input method.
+pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let e = entry.clone().upcast::<gtk::Editable>();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        let modifier = state.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK);
+        if !modifier && key.to_unicode().is_some_and(|c| !c.is_control()) && e.selection_bounds().is_some() {
+            e.delete_selection();
+        }
+        glib::Propagation::Proceed
+    });
+    entry.add_controller(keys);
+}
+
 fn dialog(parent: &gtk::Window, title: &str, width: i32, height: i32) -> (gtk::Window, gtk::Box) {
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).css_classes(["dialog-body"]).build();
     let header = gtk::HeaderBar::builder().title_widget(&gtk::Label::builder().label(title).css_classes(["heading"]).build()).build();
@@ -27,6 +43,7 @@ pub fn prompt(parent: &gtk::Window, title: &str, hint: &str, initial: &str, f: i
     let (win, body) = dialog(parent, title, 420, -1);
     body.append(&gtk::Label::builder().label(hint).xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let entry = gtk::Entry::builder().text(initial).activates_default(true).build();
+    ime_safe(&entry);
     body.append(&entry);
     let ok = gtk::Button::builder().label("OK").css_classes(["suggested-action"]).halign(gtk::Align::End).build();
     body.append(&ok);
@@ -44,6 +61,7 @@ pub fn prompt(parent: &gtk::Window, title: &str, hint: &str, initial: &str, f: i
 pub fn pick_icon(parent: &gtk::Window, f: impl Fn(&'static str) + 'static) {
     let (win, body) = dialog(parent, "Choose Icon", 680, 560);
     let search = gtk::SearchEntry::builder().placeholder_text("Search icons").build();
+    ime_safe(&search);
     let names = gtk::StringList::new(&icons::all().collect::<Vec<_>>());
     let filter = gtk::CustomFilter::new(glib::clone!(#[weak] search, #[upgrade_or] true, move |o| {
         o.downcast_ref::<gtk::StringObject>().is_some_and(|s| s.string().contains(&*search.text().to_lowercase()))
@@ -144,6 +162,8 @@ pub fn batch_rename(parent: &gtk::Window, paths: Vec<std::path::PathBuf>, f: imp
     body.append(&gtk::Label::builder().label("Find is a regular expression ($1… are its groups). {n} in Replace numbers the files.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let find = gtk::Entry::builder().placeholder_text("Find, e.g. ^(.*)\\.jpeg$").text("^(.*)$").build();
     let replace = gtk::Entry::builder().placeholder_text("Replace, e.g. img_{n}.jpg").text("$1").build();
+    ime_safe(&find);
+    ime_safe(&replace);
     body.append(&find);
     body.append(&replace);
     let preview = gtk::Label::builder().xalign(0.0).yalign(0.0).selectable(true).css_classes(["monospace"]).build();

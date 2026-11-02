@@ -93,6 +93,7 @@ fn user_name(uid: u32) -> String {
 fn checksums(body: &gtk::Box, path: &Path, cancel: &Arc<AtomicBool>) {
     body.append(&gtk::Label::builder().label("CHECKSUMS").xalign(0.0).css_classes(["side-title-label"]).build());
     let verify = gtk::Entry::builder().placeholder_text("Paste a checksum to verify").build();
+    crate::dialogs::ime_safe(&verify);
     let verdict = gtk::Label::builder().xalign(0.0).build();
     let bar = gtk::ProgressBar::new();
     let start = gtk::Button::builder().label("Compute checksums").halign(gtk::Align::Start).build();

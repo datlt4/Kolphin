@@ -83,6 +83,7 @@ impl Pane {
         status_bar.append(&gtk::Image::from_icon_name("zoom-out-symbolic"));
         status_bar.append(&slider);
         let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text or pattern like *.jpg").hexpand(true).build();
+        crate::dialogs::ime_safe(&filter);
         let filter_bar = gtk::Revealer::builder().child(&filter).css_classes(["filterbar"]).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let close = gtk::Button::builder().icon_name("window-close-symbolic").css_classes(["flat", "pane-close"]).tooltip_text("Close this view").valign(gtk::Align::Center).visible(false).build();
