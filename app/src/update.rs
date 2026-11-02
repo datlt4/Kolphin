@@ -3,7 +3,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const API: &str = "https://api.github.com/repos/datlt4/Kolphin/releases/latest";
+/// Redirects to /releases/tag/vX.Y.Z; unlike the REST API it has no 60-requests-an-hour limit.
+const LATEST: &str = "https://github.com/datlt4/Kolphin/releases/latest";
+const DOWNLOAD: &str = "https://github.com/datlt4/Kolphin/releases/download";
 const INSTALLED_EXE: &str = "/usr/bin/kolphin";
 
 pub struct Release {
@@ -15,25 +17,18 @@ pub struct Release {
 
 /// The newest release if it should be offered: not installed yet, or newer than this build.
 pub fn check() -> Result<Option<Release>, String> {
-    let mut resp = match ureq::get(API).header("User-Agent", "Kolphin").call() {
-        Err(ureq::Error::StatusCode(404)) => return Ok(None), // no release published yet
-        r => r.map_err(|e| e.to_string())?,
-    };
-    let rel: serde_json::Value = resp
-        .body_mut()
-        .read_json()
-        .map_err(|e| e.to_string())?;
-    let version = rel["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
-    let suffix = format!("_{}.deb", deb_arch());
-    let deb_url = rel["assets"].as_array().into_iter().flatten().find_map(|a| {
-        let name = a["name"].as_str()?;
-        name.ends_with(&suffix).then(|| a["browser_download_url"].as_str().unwrap_or("").to_string())
-    });
+    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).build().into();
+    let resp = agent.get(LATEST).header("User-Agent", "Kolphin").call().map_err(|e| e.to_string())?;
+    let location = resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let Some(version) = version_from_location(location) else { return Ok(None) }; // no release published yet
+    let deb_url = format!("{DOWNLOAD}/v{version}/kolphin_{version}_{}.deb", deb_arch());
     let fresh_install = !Path::new(INSTALLED_EXE).exists();
-    Ok(match deb_url {
-        Some(deb_url) if fresh_install || newer(&version, env!("CARGO_PKG_VERSION")) => Some(Release { version, deb_url, fresh_install }),
-        _ => None,
-    })
+    Ok((fresh_install || newer(&version, env!("CARGO_PKG_VERSION"))).then_some(Release { version, deb_url, fresh_install }))
+}
+
+fn version_from_location(location: &str) -> Option<String> {
+    let v = location.rsplit_once("/tag/v")?.1;
+    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
 }
 
 /// Download to the cache dir, reporting (bytes so far, total).
@@ -95,6 +90,12 @@ fn newer(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn version_from_redirect() {
+        assert_eq!(super::version_from_location("https://github.com/datlt4/Kolphin/releases/tag/v0.6.0").as_deref(), Some("0.6.0"));
+        assert_eq!(super::version_from_location("https://github.com/datlt4/Kolphin/releases"), None);
+    }
+
     #[test]
     fn version_order() {
         assert!(super::newer("0.1.1", "0.1.0"));
