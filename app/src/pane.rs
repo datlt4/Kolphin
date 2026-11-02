@@ -2,6 +2,7 @@
 use crate::canvas::{Action, Canvas, ViewMode};
 use crate::model::{self, Entry, Msg, UNKNOWN_SIZE};
 use crate::pathbar::PathBar;
+use crate::viewprops::{self, ViewProps};
 use gtk::{gio, glib, prelude::*};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -27,6 +28,10 @@ pub struct Pane {
     vscroll: gtk::Scrollbar,
     hscroll: gtk::Scrollbar,
     status: gtk::Label,
+    slider: gtk::Scale,
+    syncing: Cell<bool>,
+    filter: gtk::SearchEntry,
+    filter_bar: gtk::Revealer,
     path: RefCell<PathBuf>,
     back: RefCell<Vec<PathBuf>>,
     forward: RefCell<Vec<PathBuf>>,
@@ -36,6 +41,8 @@ pub struct Pane {
     changes: RefCell<Changes>,
     pending_select: RefCell<Option<OsString>>,
     pub on_navigated: Callback,
+    /// Sort/group/mode changed (refresh the window's menus).
+    pub on_view: Callback,
     pub on_focus: Callback,
     pub on_open_tab: PathCallback,
 }
@@ -60,12 +67,22 @@ impl Pane {
         let view = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         view.append(&canvas);
         view.append(&vscroll);
-        let status = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["statusbar"]).build();
+        let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 16.0, 256.0, 1.0);
+        slider.set_width_request(140);
+        slider.set_tooltip_text(Some("Icon size (Ctrl+scroll)"));
+        let status_bar = gtk::Box::builder().spacing(12).css_classes(["statusbar"]).build();
+        status_bar.append(&status);
+        status_bar.append(&gtk::Image::from_icon_name("zoom-out-symbolic"));
+        status_bar.append(&slider);
+        let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text or pattern like *.jpg").hexpand(true).build();
+        let filter_bar = gtk::Revealer::builder().child(&filter).css_classes(["filterbar"]).build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&pathbar.root);
+        root.append(&filter_bar);
         root.append(&view);
         root.append(&hscroll);
-        root.append(&status);
+        root.append(&status_bar);
 
         let pane = Rc::new(Pane {
             root,
@@ -74,6 +91,10 @@ impl Pane {
             vscroll,
             hscroll,
             status,
+            slider,
+            syncing: Default::default(),
+            filter,
+            filter_bar,
             path: RefCell::new(path),
             back: Default::default(),
             forward: Default::default(),
@@ -83,6 +104,7 @@ impl Pane {
             changes: Default::default(),
             pending_select: Default::default(),
             on_navigated: Default::default(),
+            on_view: Default::default(),
             on_focus: Default::default(),
             on_open_tab: Default::default(),
         });
@@ -102,6 +124,27 @@ impl Pane {
                 pane.on_canvas(a);
             }
         }));
+        pane.slider.connect_value_changed(glib::clone!(#[strong] weak, move |s| {
+            let Some(pane) = weak.upgrade() else { return };
+            if !pane.syncing.get() {
+                pane.canvas.set_icon_size(s.value());
+                pane.save_props();
+            }
+        }));
+        pane.filter.connect_search_changed(glib::clone!(#[strong] weak, move |e| {
+            if let Some(pane) = weak.upgrade() {
+                let text = e.text().to_string();
+                pane.canvas.update(|m| {
+                    m.filter = text;
+                    m.rebuild_order();
+                });
+            }
+        }));
+        pane.filter.connect_stop_search(glib::clone!(#[strong] weak, move |_| {
+            if let Some(pane) = weak.upgrade() {
+                pane.close_filter();
+            }
+        }));
         let focus = gtk::EventControllerFocus::new();
         focus.connect_enter(glib::clone!(#[strong] weak, move |_| {
             if let Some(pane) = weak.upgrade() {
@@ -111,20 +154,102 @@ impl Pane {
             }
         }));
         pane.root.add_controller(focus);
-        pane.set_mode(mode);
+        pane.show_mode(mode);
         pane.load();
         pane
     }
 
     pub fn set_mode(&self, mode: ViewMode) {
+        self.show_mode(mode);
+        self.save_props();
+    }
+
+    fn show_mode(&self, mode: ViewMode) {
         let compact = mode == ViewMode::Compact;
         self.vscroll.set_visible(!compact);
         self.hscroll.set_visible(compact);
         self.canvas.set_mode(mode);
+        self.sync_slider();
+    }
+
+    fn sync_slider(&self) {
+        let (lo, hi) = self.canvas.icon_range();
+        self.syncing.set(true);
+        self.slider.set_range(lo, hi);
+        self.slider.set_value(self.canvas.icon_size());
+        self.syncing.set(false);
+    }
+
+    /// Sort by `key`; the same key again flips the direction.
+    pub fn sort_by(&self, key: model::SortBy, desc: Option<bool>) {
+        self.canvas.update(|m| {
+            m.desc = desc.unwrap_or(m.sort == key && !m.desc);
+            m.sort = key;
+            m.rebuild_order();
+        });
+        self.save_props();
+    }
+
+    pub fn group_by(&self, group: model::GroupBy) {
+        self.canvas.update(|m| {
+            m.group = group;
+            m.rebuild_order();
+        });
+        self.save_props();
+    }
+
+    pub fn toggle_filter(&self) {
+        if self.filter_bar.reveals_child() && self.filter.has_focus() {
+            self.close_filter();
+        } else {
+            self.filter_bar.set_reveal_child(true);
+            self.filter.grab_focus();
+        }
+    }
+
+    fn close_filter(&self) {
+        self.filter.set_text("");
+        self.filter_bar.set_reveal_child(false);
+        self.canvas.grab_focus();
+    }
+
+    fn props(&self) -> ViewProps {
+        let m = self.canvas.model();
+        let (icon_size, list_size) = self.canvas.sizes();
+        let mut collapsed: Vec<String> = m.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        ViewProps { mode: self.canvas.mode(), icon_size, list_size, sort: m.sort, desc: m.desc, group: m.group, collapsed }
+    }
+
+    fn save_props(&self) {
+        viewprops::save(&self.path(), self.props());
+        if let Some(f) = self.on_view.borrow().as_ref() {
+            f();
+        }
+    }
+
+    fn apply_props(&self, p: &ViewProps) {
+        self.canvas.set_sizes(p.icon_size, p.list_size);
+        self.show_mode(p.mode);
+        self.canvas.update(|m| {
+            m.sort = p.sort;
+            m.desc = p.desc;
+            m.group = p.group;
+            m.collapsed = p.collapsed.iter().cloned().collect();
+        });
+        if let Some(f) = self.on_view.borrow().as_ref() {
+            f();
+        }
     }
 
     pub fn path(&self) -> PathBuf {
         self.path.borrow().clone()
+    }
+
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        let dir = self.path();
+        let m = self.canvas.model();
+        self.canvas.selection().into_iter().map(|i| dir.join(&*m.entries[i as usize].name)).collect()
     }
 
     pub fn navigate(self: &Rc<Self>, path: PathBuf) {
@@ -188,6 +313,9 @@ impl Pane {
         let show_hidden = self.canvas.model().show_hidden;
         self.canvas.reset(show_hidden);
         self.canvas.set_dir(path.clone());
+        self.filter.set_text("");
+        self.filter_bar.set_reveal_child(false);
+        self.apply_props(&viewprops::load(&path).unwrap_or_default());
         self.pathbar.set_path(&path);
         self.loading.set(true);
         if let Some(f) = self.on_navigated.borrow().as_ref() {
@@ -223,10 +351,11 @@ impl Pane {
                         }
                         names_done = true;
                         pane.canvas.update(|m| {
-                            for (i, (size, mtime)) in stats.into_iter().enumerate() {
-                                let e = &mut m.entries[start + i];
-                                e.size = size;
-                                e.mtime = mtime;
+                            for (i, st) in stats.into_iter().enumerate() {
+                                m.entries[start + i].set_stat(st);
+                            }
+                            if m.sort != model::SortBy::Name || m.group != model::GroupBy::None {
+                                m.rebuild_order();
                             }
                         });
                         pane.canvas.invalidate_text();
@@ -289,6 +418,11 @@ impl Pane {
             }
             Action::Up => self.go_up(),
             Action::Changed => self.update_status(),
+            Action::SortBy(key) => self.sort_by(key, None),
+            Action::ViewChanged => {
+                self.sync_slider();
+                self.save_props();
+            }
         }
     }
 
@@ -366,7 +500,8 @@ impl Pane {
                 let path = dir.join(&name);
                 let meta = std::fs::symlink_metadata(&path).ok()?;
                 let mut e = Entry::new(name, path.is_dir() || meta.is_dir());
-                (e.size, e.mtime) = model::stat(&path);
+                e.symlink = meta.file_type().is_symlink();
+                e.set_stat(model::stat(&path));
                 Some(e)
             })
             .collect();

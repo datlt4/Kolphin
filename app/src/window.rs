@@ -1,5 +1,8 @@
 //! Main window: places sidebar, tabs, split view, header bar and window actions.
 use crate::canvas::ViewMode;
+use crate::clipboard;
+use crate::model::{GroupBy, SortBy};
+use crate::viewprops;
 use crate::pane::Pane;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -27,6 +30,12 @@ pub struct Win {
     pub toasts: adw::ToastOverlay,
     tab_list: RefCell<Vec<Rc<Tab>>>,
     show_hidden: Cell<bool>,
+    content: gtk::Paned,
+    sidebar: gtk::Box,
+    main_col: gtk::Box,
+    header: adw::HeaderBar,
+    side_header: adw::HeaderBar,
+    view_button: gtk::MenuButton,
     places: gtk::ListBox,
     place_paths: RefCell<Vec<Option<PathBuf>>>,
 }
@@ -53,6 +62,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.view-mode('details')", &["<Control>3"]),
         ("win.zoom-in", &["<Control>plus", "<Control>equal"]),
         ("win.zoom-out", &["<Control>minus"]),
+        ("win.filter", &["<Control>i"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -83,28 +93,19 @@ fn mode_name(m: ViewMode) -> &'static str {
 
 impl Win {
     fn new(app: &adw::Application) -> Rc<Self> {
-        let header = adw::HeaderBar::builder().show_start_title_buttons(false).build();
-        for (icon, action, tip) in [("go-previous-symbolic", "win.back", "Back"), ("go-next-symbolic", "win.forward", "Forward"), ("go-up-symbolic", "win.up", "Up")] {
+        let right = viewprops::sidebar_right();
+        let header = adw::HeaderBar::builder().show_start_title_buttons(right).show_end_title_buttons(!right).build();
+        for (icon, action, tip) in [("edit-cut-symbolic", "win.cut", "Cut (Ctrl+X)"), ("edit-copy-symbolic", "win.copy", "Copy (Ctrl+C)"), ("edit-paste-symbolic", "win.paste", "Paste (Ctrl+V)")] {
             header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
         }
         let menu = gio::Menu::new();
         menu.append(Some("New Tab"), Some("win.new-tab"));
-        menu.append(Some("Show Hidden Files"), Some("win.toggle-hidden"));
+        menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
         header.pack_end(&gtk::ToggleButton::builder().icon_name("view-dual-symbolic").action_name("win.split").tooltip_text("Split View (F3)").build());
-        let modes = gtk::Box::builder().css_classes(["linked"]).build();
-        for (icon, mode, tip) in [("view-grid-symbolic", "icons", "Icons"), ("view-continuous-symbolic", "compact", "Compact"), ("view-list-symbolic", "details", "Details")] {
-            modes.append(
-                &gtk::ToggleButton::builder()
-                    .icon_name(icon)
-                    .action_name("win.view-mode")
-                    .action_target(&mode.to_variant())
-                    .tooltip_text(tip)
-                    .build(),
-            );
-        }
-        header.pack_end(&modes);
+        let view_button = gtk::MenuButton::builder().icon_name("view-grid-symbolic").menu_model(&view_menu()).tooltip_text("View, sort and group").build();
+        header.pack_end(&view_button);
 
         let tabs = adw::TabView::new();
         let tab_bar = adw::TabBar::builder().view(&tabs).autohide(true).build();
@@ -125,8 +126,11 @@ impl Win {
             img.set_paintable(Some(&logo));
         }
         brand.append(&gtk::Label::new(Some("Kolphin")));
-        let side_header = adw::HeaderBar::builder().show_end_title_buttons(false).show_start_title_buttons(false).title_widget(&brand).build();
-        side_header.set_centering_policy(adw::CenteringPolicy::Loose);
+        let side_header = adw::HeaderBar::builder().show_end_title_buttons(right).show_start_title_buttons(!right).title_widget(&gtk::Box::new(gtk::Orientation::Horizontal, 0)).build();
+        side_header.pack_start(&brand);
+        for (icon, action, tip) in [("go-previous-symbolic", "win.back", "Back (Alt+Left)"), ("go-next-symbolic", "win.forward", "Forward (Alt+Right)")] {
+            side_header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
+        }
         let places = gtk::ListBox::builder().css_classes(["places"]).build();
         let side_scroll = gtk::ScrolledWindow::builder().child(&places).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
         let version = gtk::Label::builder().label(format!("v{}", env!("CARGO_PKG_VERSION"))).xalign(0.0).css_classes(["side-foot"]).build();
@@ -135,7 +139,7 @@ impl Win {
         sidebar.append(&side_scroll);
         sidebar.append(&version);
 
-        let content = gtk::Paned::builder().start_child(&sidebar).end_child(&main_col).position(230).shrink_start_child(false).build();
+        let content = gtk::Paned::builder().shrink_start_child(false).shrink_end_child(false).build();
         content.add_css_class("root-split");
         content.set_wide_handle(false);
         content.set_vexpand(true);
@@ -151,6 +155,12 @@ impl Win {
             .build();
 
         let win = Rc::new(Win {
+            content,
+            sidebar,
+            main_col,
+            header,
+            side_header,
+            view_button,
             window,
             tabs,
             toasts,
@@ -161,6 +171,7 @@ impl Win {
         });
         win.setup_actions();
         win.setup_places();
+        win.place_sidebar(right);
 
         let weak = Rc::downgrade(&win);
         win.tabs.connect_selected_page_notify(glib::clone!(#[strong] weak, move |_| {
@@ -234,6 +245,11 @@ impl Win {
                 win.sync();
             }
         })));
+        *pane.on_view.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move || {
+            if let Some(win) = w.upgrade() {
+                win.sync();
+            }
+        })));
         *pane.on_open_tab.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |path| {
             if let Some(win) = w.upgrade() {
                 win.add_tab_background(path);
@@ -292,8 +308,27 @@ impl Win {
         let Some(tab) = self.current_tab() else { return };
         let pane = tab.pane();
         self.window.set_title(Some(&format!("{} — Kolphin", folder_name(&pane.path()))));
+        let mode = pane.canvas.mode();
         if let Some(a) = self.action("view-mode") {
-            a.set_state(&mode_name(pane.canvas.mode()).to_variant());
+            a.set_state(&mode_name(mode).to_variant());
+        }
+        self.view_button.set_icon_name(match mode {
+            ViewMode::Icons => "view-grid-symbolic",
+            ViewMode::Compact => "view-continuous-symbolic",
+            ViewMode::Details => "view-list-symbolic",
+        });
+        let (sort, desc, group) = {
+            let m = pane.canvas.model();
+            (m.sort, m.desc, m.group)
+        };
+        if let Some(a) = self.action("sort-by") {
+            a.set_state(&format!("{sort:?}").to_lowercase().to_variant());
+        }
+        if let Some(a) = self.action("sort-desc") {
+            a.set_state(&desc.to_variant());
+        }
+        if let Some(a) = self.action("group-by") {
+            a.set_state(&format!("{group:?}").to_lowercase().to_variant());
         }
         if let Some(a) = self.action("split") {
             a.set_state(&(tab.panes.borrow().len() > 1).to_variant());
@@ -306,6 +341,24 @@ impl Win {
                 p.root.remove_css_class("pane-inactive");
             }
         }
+    }
+
+    /// Put the sidebar on the left or right; window buttons follow the outer edge.
+    fn place_sidebar(&self, right: bool) {
+        let c = &self.content;
+        c.set_start_child(None::<&gtk::Widget>);
+        c.set_end_child(None::<&gtk::Widget>);
+        let (start, end): (&gtk::Widget, &gtk::Widget) = if right { (self.main_col.upcast_ref(), self.sidebar.upcast_ref()) } else { (self.sidebar.upcast_ref(), self.main_col.upcast_ref()) };
+        c.set_start_child(Some(start));
+        c.set_end_child(Some(end));
+        c.set_resize_start_child(right);
+        c.set_resize_end_child(!right);
+        self.header.set_show_start_title_buttons(right);
+        self.header.set_show_end_title_buttons(!right);
+        self.side_header.set_show_start_title_buttons(!right);
+        self.side_header.set_show_end_title_buttons(right);
+        let width = self.window.default_width().max(self.window.width());
+        c.set_position(if right { width - 240 } else { 240 });
     }
 
     fn action(&self, name: &str) -> Option<gio::SimpleAction> {
@@ -335,9 +388,60 @@ impl Win {
                 w.tabs.close_page(&page);
             }
         });
-        add("zoom-in", |w| w.pane().canvas.zoom_by(1.15));
-        add("zoom-out", |w| w.pane().canvas.zoom_by(1.0 / 1.15));
+        add("zoom-in", |w| w.pane().canvas.zoom_by(true));
+        add("zoom-out", |w| w.pane().canvas.zoom_by(false));
         add("check-update", |w| crate::check_update(&w.toasts, true));
+        add("filter", |w| w.pane().toggle_filter());
+        add("copy", |w| clipboard::copy(&w.pane(), false, &w.toasts));
+        add("cut", |w| clipboard::copy(&w.pane(), true, &w.toasts));
+        add("paste", |w| clipboard::paste(&w.pane(), &w.toasts));
+
+        let stateful = |name: &str, init: glib::Variant, f: fn(&Rc<Win>, &glib::Variant)| {
+            let param = (init.type_() == glib::VariantTy::STRING).then_some(glib::VariantTy::STRING);
+            let a = gio::SimpleAction::new_stateful(name, param, &init);
+            let w = self.weak();
+            a.connect_activate(move |a, v| {
+                let Some(win) = w.upgrade() else { return };
+                // Booleans toggle; strings take the chosen target.
+                let next = match v {
+                    Some(v) => v.clone(),
+                    None => (!a.state().and_then(|s| s.get::<bool>()).unwrap_or(false)).to_variant(),
+                };
+                a.set_state(&next);
+                f(&win, &next);
+            });
+            self.window.add_action(&a);
+        };
+        stateful("sort-by", "name".to_variant(), |w, v| {
+            let key = match v.get::<String>().as_deref() {
+                Some("size") => SortBy::Size,
+                Some("modified") => SortBy::Modified,
+                Some("type") => SortBy::Type,
+                Some("extension") => SortBy::Extension,
+                _ => SortBy::Name,
+            };
+            let desc = w.pane().canvas.model().desc;
+            w.pane().sort_by(key, Some(desc));
+        });
+        stateful("sort-desc", false.to_variant(), |w, v| {
+            let key = w.pane().canvas.model().sort;
+            w.pane().sort_by(key, v.get::<bool>());
+        });
+        stateful("group-by", "none".to_variant(), |w, v| {
+            w.pane().group_by(match v.get::<String>().as_deref() {
+                Some("name") => GroupBy::Name,
+                Some("type") => GroupBy::Type,
+                Some("extension") => GroupBy::Extension,
+                Some("size") => GroupBy::Size,
+                Some("modified") => GroupBy::Modified,
+                _ => GroupBy::None,
+            });
+        });
+        stateful("sidebar-right", viewprops::sidebar_right().to_variant(), |w, v| {
+            let right = v.get::<bool>().unwrap_or(false);
+            viewprops::set_sidebar_right(right);
+            w.place_sidebar(right);
+        });
 
         let split = gio::SimpleAction::new_stateful("split", None, &false.to_variant());
         let w = self.weak();
@@ -448,6 +552,38 @@ impl Win {
         }
         *self.place_paths.borrow_mut() = paths.into_inner();
     }
+}
+
+/// View dropdown: mode, sort, group, hidden files, filter.
+fn view_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    let section = |title: &str, items: &[(&str, &str)], action: &str| {
+        let s = gio::Menu::new();
+        for (label, target) in items {
+            let item = gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(Some(action), Some(&target.to_variant()));
+            s.append_item(&item);
+        }
+        menu.append_section(Some(title), &s);
+        s
+    };
+    section("View", &[("Icons", "icons"), ("Compact", "compact"), ("Details", "details")], "win.view-mode");
+    let sort = section(
+        "Sort by",
+        &[("Name", "name"), ("Size", "size"), ("Modified", "modified"), ("Type", "type"), ("Extension", "extension")],
+        "win.sort-by",
+    );
+    sort.append(Some("Descending"), Some("win.sort-desc"));
+    section(
+        "Group by",
+        &[("None", "none"), ("Name", "name"), ("Type", "type"), ("Extension", "extension"), ("Size", "size"), ("Modified", "modified")],
+        "win.group-by",
+    );
+    let more = gio::Menu::new();
+    more.append(Some("Show Hidden Files"), Some("win.toggle-hidden"));
+    more.append(Some("Filter…"), Some("win.filter"));
+    menu.append_section(None, &more);
+    menu
 }
 
 fn folder_name(p: &std::path::Path) -> String {

@@ -1,10 +1,12 @@
 mod canvas;
+mod clipboard;
 mod icons;
 mod model;
 mod pane;
 mod pathbar;
 mod thumbs;
 mod update;
+mod viewprops;
 mod window;
 
 use adw::prelude::*;

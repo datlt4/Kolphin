@@ -1,6 +1,6 @@
 //! Virtualized file view: only the visible items are laid out and drawn (Icons / Compact / Details).
 use crate::icons;
-use crate::model::{Model, UNKNOWN_SIZE, UNKNOWN_TIME};
+use crate::model::{GroupBy, Model, SortBy, UNKNOWN_SIZE, UNKNOWN_TIME};
 use crate::thumbs;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, gio, glib, graphene, gsk, pango, prelude::*};
@@ -8,7 +8,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::time::Instant;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum ViewMode {
     #[default]
     Icons,
@@ -20,6 +20,10 @@ pub enum Action {
     Activate(u32),
     OpenInNewTab(u32),
     Up,
+    /// Details column header clicked.
+    SortBy(SortBy),
+    /// Group collapsed/expanded or icon size changed (save the folder's view).
+    ViewChanged,
     /// Selection or contents changed (refresh the status bar).
     Changed,
 }
@@ -27,11 +31,20 @@ pub enum Action {
 type ActionHandler = Box<dyn Fn(Action)>;
 
 const HEADER_H: f64 = 28.0;
+const GROUP_H: f64 = 38.0;
 const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
 
-#[derive(Clone, Copy)]
+/// One group laid out along the scroll axis.
+struct Sec {
+    start: usize,
+    len: usize,
+    /// Content offset along the scroll axis and the space it takes.
+    off: f64,
+    extent: f64,
+}
+
 struct Geometry {
     /// Columns per row (vertical modes).
     cols: usize,
@@ -41,25 +54,83 @@ struct Geometry {
     cell_w: f64,
     cell_h: f64,
     icon: f64,
+    /// Details column header.
     top: f64,
+    /// Group header (0 when not grouped).
+    hdr: f64,
+    secs: Vec<Sec>,
+    total: f64,
+}
+
+enum Hit {
+    Item(usize),
+    Header(usize),
 }
 
 impl Geometry {
     /// Content-space top-left corner of the item at position `p`.
     fn origin(&self, p: usize) -> (f64, f64) {
+        let s = &self.secs[self.secs.partition_point(|s| s.start + s.len <= p).min(self.secs.len() - 1)];
+        let local = p - s.start;
         if self.horizontal {
-            ((p / self.rows) as f64 * self.cell_w, (p % self.rows) as f64 * self.cell_h)
+            (s.off + (local / self.rows) as f64 * self.cell_w, self.hdr + (local % self.rows) as f64 * self.cell_h)
         } else {
-            ((p % self.cols) as f64 * self.cell_w, self.top + (p / self.cols) as f64 * self.cell_h)
+            ((local % self.cols) as f64 * self.cell_w, s.off + self.hdr + (local / self.cols) as f64 * self.cell_h)
         }
     }
 
-    fn at(&self, col: usize, row: usize) -> usize {
-        if self.horizontal {
-            col * self.rows + row
+    fn hit(&self, cx: f64, cy: f64) -> Option<Hit> {
+        let a = if self.horizontal { cx } else { cy };
+        let i = self.secs.partition_point(|s| s.off + s.extent <= a);
+        let s = self.secs.get(i)?;
+        let local = if self.horizontal {
+            if cy < self.hdr {
+                return Some(Hit::Header(i));
+            }
+            let (col, row) = (((cx - s.off) / self.cell_w) as usize, ((cy - self.hdr) / self.cell_h) as usize);
+            (row < self.rows).then_some(col * self.rows + row)?
         } else {
-            row * self.cols + col
+            let ly = cy - s.off;
+            if ly < self.hdr {
+                return Some(Hit::Header(i));
+            }
+            let (col, row) = ((cx / self.cell_w) as usize, ((ly - self.hdr) / self.cell_h) as usize);
+            (col < self.cols).then_some(row * self.cols + col)?
+        };
+        (local < s.len).then_some(Hit::Item(s.start + local))
+    }
+
+    /// Positions of the items intersecting the content rectangle, in order.
+    fn items_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<usize> {
+        let mut out = Vec::new();
+        let (a0, a1) = if self.horizontal { (x0, x1) } else { (y0, y1) };
+        let first = self.secs.partition_point(|s| s.off + s.extent <= a0);
+        for s in &self.secs[first..] {
+            if s.off > a1 {
+                break;
+            }
+            if self.horizontal {
+                let (ry0, ry1) = ((y0 - self.hdr).max(0.0), y1 - self.hdr);
+                if ry1 < 0.0 {
+                    continue;
+                }
+                let (c0, c1) = (((x0 - s.off).max(0.0) / self.cell_w) as usize, ((x1 - s.off) / self.cell_w) as usize);
+                let (r0, r1) = ((ry0 / self.cell_h) as usize, ((ry1 / self.cell_h) as usize).min(self.rows - 1));
+                for c in c0..=c1 {
+                    out.extend((r0..=r1).map(|r| c * self.rows + r).filter(|&l| l < s.len).map(|l| s.start + l));
+                }
+            } else {
+                let (ly0, ly1) = ((y0 - s.off - self.hdr).max(0.0), y1 - s.off - self.hdr);
+                if ly1 < 0.0 {
+                    continue;
+                }
+                let (c0, c1) = ((x0.max(0.0) / self.cell_w) as usize, ((x1 / self.cell_w) as usize).min(self.cols - 1));
+                for r in (ly0 / self.cell_h) as usize..=(ly1 / self.cell_h) as usize {
+                    out.extend((c0..=c1).map(|c| r * self.cols + c).filter(|&l| l < s.len).map(|l| s.start + l));
+                }
+            }
         }
+        out
     }
 }
 
@@ -91,6 +162,7 @@ mod imp {
         pub model: RefCell<Model>,
         pub mode: Cell<ViewMode>,
         pub zoom: Cell<f64>,
+        pub small: Cell<f64>,
         pub vadj: gtk::Adjustment,
         pub hadj: gtk::Adjustment,
         pub cursor: Cell<Option<u32>>,
@@ -122,6 +194,7 @@ mod imp {
                 model: Default::default(),
                 mode: Default::default(),
                 zoom: Cell::new(64.0),
+                small: Cell::new(22.0),
                 vadj: gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 1.0, 0.0),
                 hadj: gtk::Adjustment::new(0.0, 0.0, 0.0, 1.0, 1.0, 0.0),
                 cursor: Default::default(),
@@ -263,10 +336,39 @@ impl Canvas {
         self.relayout();
     }
 
-    pub fn zoom_by(&self, factor: f64) {
-        let imp = self.imp();
-        imp.zoom.set((imp.zoom.get() * factor).clamp(32.0, 256.0));
+    /// Icon size of the current mode (Icons: 32–256, Compact/Details: 16–64).
+    pub fn icon_size(&self) -> f64 {
+        if self.mode() == ViewMode::Icons { self.imp().zoom.get() } else { self.imp().small.get() }
+    }
+
+    pub fn icon_range(&self) -> (f64, f64) {
+        if self.mode() == ViewMode::Icons { (32.0, 256.0) } else { (16.0, 64.0) }
+    }
+
+    pub fn set_icon_size(&self, px: f64) {
+        let (lo, hi) = self.icon_range();
+        let px = px.round().clamp(lo, hi);
+        let cell = if self.mode() == ViewMode::Icons { &self.imp().zoom } else { &self.imp().small };
+        if cell.replace(px) != px {
+            self.relayout();
+        }
+    }
+
+    /// Both sizes, for saving: (icons, list).
+    pub fn sizes(&self) -> (f64, f64) {
+        (self.imp().zoom.get(), self.imp().small.get())
+    }
+
+    pub fn set_sizes(&self, icons: f64, list: f64) {
+        self.imp().zoom.set(icons.clamp(32.0, 256.0));
+        self.imp().small.set(list.clamp(16.0, 64.0));
         self.relayout();
+    }
+
+    pub fn zoom_by(&self, grow: bool) {
+        let s = self.icon_size();
+        self.set_icon_size(if self.mode() == ViewMode::Icons { if grow { s * 1.15 } else { s / 1.15 } } else if grow { s + 2.0 } else { s - 2.0 });
+        self.emit(Action::ViewChanged);
     }
 
     fn relayout(&self) {
@@ -318,50 +420,70 @@ impl Canvas {
     }
 
     fn geometry(&self) -> Geometry {
-        let w = self.width().max(1) as f64;
-        match self.mode() {
+        let (w, h) = (self.width().max(1) as f64, self.height().max(1) as f64);
+        let m = self.model();
+        let hdr = if m.group == GroupBy::None { 0.0 } else { GROUP_H };
+        let small = self.imp().small.get();
+        let list_h = (small + 8.0).max(26.0);
+        let mut g = match self.mode() {
             ViewMode::Icons => {
                 let icon = self.imp().zoom.get();
                 let cols = ((w / (icon + 48.0).max(104.0)) as usize).max(1);
                 let cell_h = icon + 2.0 * self.line_height() + 28.0;
-                Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, icon, top: 0.0 }
+                Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, icon, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
             ViewMode::Compact => {
-                let rows = (((self.height() as f64 - 8.0) / 30.0) as usize).max(1);
-                Geometry { cols: 0, rows, horizontal: true, cell_w: 280.0, cell_h: 30.0, icon: 22.0, top: 0.0 }
+                let rows = (((h - 8.0 - hdr) / list_h) as usize).max(1);
+                let cell_w = 260.0 + (small - 22.0) * 2.0;
+                Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: list_h, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
-            ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: 30.0, icon: 22.0, top: HEADER_H },
+            ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: list_h, icon: small, top: HEADER_H, hdr, secs: Vec::new(), total: 0.0 },
+        };
+        let mut off = g.top;
+        for s in &m.sections {
+            let extent = if g.horizontal {
+                s.len.div_ceil(g.rows).max(1) as f64 * g.cell_w
+            } else {
+                g.hdr + s.len.div_ceil(g.cols) as f64 * g.cell_h
+            };
+            g.secs.push(Sec { start: s.start, len: s.len, off, extent });
+            off += extent;
         }
+        if g.secs.is_empty() {
+            g.secs.push(Sec { start: 0, len: 0, off, extent: 0.0 });
+        }
+        g.total = off + if g.horizontal { 0.0 } else { 8.0 };
+        g
     }
 
     fn update_adjustment(&self) {
         let g = self.geometry();
-        let n = self.model().order.len();
         let imp = self.imp();
-        let (adj, other, page, upper, step) = if g.horizontal {
-            (&imp.hadj, &imp.vadj, self.width() as f64, n.div_ceil(g.rows) as f64 * g.cell_w, g.cell_w)
+        let (adj, other, page, step) = if g.horizontal {
+            (&imp.hadj, &imp.vadj, self.width() as f64, g.cell_w)
         } else {
-            (&imp.vadj, &imp.hadj, self.height() as f64, g.top + n.div_ceil(g.cols) as f64 * g.cell_h + 8.0, g.cell_h)
+            (&imp.vadj, &imp.hadj, self.height() as f64, g.cell_h)
         };
-        let value = adj.value().clamp(0.0, (upper - page).max(0.0));
-        adj.configure(value, 0.0, upper, step, page * 0.9, page);
+        let value = adj.value().clamp(0.0, (g.total - page).max(0.0));
+        adj.configure(value, 0.0, g.total, step, page * 0.9, page);
         other.configure(0.0, 0.0, 0.0, 1.0, 1.0, 0.0);
     }
 
     /// Position (in `order`) under widget point (x, y).
     fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        match self.hit_any(x, y)? {
+            Hit::Item(p) => Some(p),
+            Hit::Header(_) => None,
+        }
+    }
+
+    fn hit_any(&self, x: f64, y: f64) -> Option<Hit> {
         let g = self.geometry();
         if y < g.top || x < 0.0 {
             return None;
         }
         let (sx, sy) = self.offset();
-        let (cx, cy) = (x + sx, y + sy - g.top);
-        let (col, row) = ((cx / g.cell_w) as usize, (cy / g.cell_h) as usize);
-        if (g.horizontal && row >= g.rows) || (!g.horizontal && col >= g.cols) {
-            return None;
-        }
-        let p = g.at(col, row);
-        (p < self.model().order.len()).then_some(p)
+        g.hit(x + sx, y + sy)
     }
 
     fn cursor_pos(&self) -> Option<usize> {
@@ -375,7 +497,7 @@ impl Canvas {
         let (start, size, view) = if g.horizontal {
             (x, g.cell_w, self.width() as f64)
         } else {
-            (y - g.top, g.cell_h, self.height() as f64 - g.top)
+            (y - g.top - g.hdr, g.cell_h + g.hdr, self.height() as f64 - g.top)
         };
         self.stop_animation();
         let adj = self.scroll_adj();
@@ -403,7 +525,8 @@ impl Canvas {
         if !imp.texts.borrow().contains_key(&idx) {
             let m = self.model();
             let e = &m.entries[idx as usize];
-            let name = self.create_pango_layout(Some(&e.name.to_string_lossy()));
+            let label = e.name.to_string_lossy();
+            let name = self.create_pango_layout(Some(&if e.symlink { format!("{label} ↪") } else { label.into_owned() }));
             name.set_width((width.max(1.0) * pango::SCALE as f64) as i32);
             name.set_ellipsize(pango::EllipsizeMode::End);
             if self.mode() == ViewMode::Icons {
@@ -465,19 +588,14 @@ impl Canvas {
         let name_w = (size_x - name_x - 8.0).max(40.0);
 
         snap.push_clip(&rect(0.0, 0.0, w, h));
-        let len = self.model().order.len();
-        let (first, last) = if g.horizontal {
-            (((sx / g.cell_w) as usize) * g.rows, (((sx + w) / g.cell_w).ceil() as usize + 1) * g.rows)
-        } else {
-            (((sy / g.cell_h) as usize) * g.cols, (((sy + h) / g.cell_h).ceil() as usize + 1) * g.cols)
-        };
+        let visible = g.items_in(sx, sy, sx + w, sy + h);
         let focus = self.has_focus();
-        for p in first..last.min(len) {
-            let (idx, selected, icon) = {
+        for &p in &visible {
+            let (idx, selected, icon, symlink, nlink) = {
                 let m = self.model();
                 let idx = m.order[p];
                 let e = &m.entries[idx as usize];
-                (idx, m.selected[idx as usize], icons::icon_name(&e.name.to_string_lossy(), e.is_dir))
+                (idx, m.selected[idx as usize], icons::icon_name(&e.name.to_string_lossy(), e.is_dir), e.symlink, if e.is_dir { 1 } else { e.nlink })
             };
             let thumb = match imp.thumbs.borrow().get(&idx) {
                 Some(Thumb::Ready(_, tex)) => Some(tex.clone()),
@@ -521,6 +639,22 @@ impl Canvas {
             } else if let Some(tex) = icons::texture(icon, (g.icon * scale).round() as u32) {
                 snap.append_texture(&tex, &rect(ix, iy, g.icon, g.icon));
             }
+            // Link badges: ↪ symlink (bottom-left), ×N hard links (bottom-right).
+            for (text, right) in [(symlink.then(|| "↪".to_string()), false), ((nlink > 1).then(|| format!("×{nlink}")), true)] {
+                let Some(text) = text else { continue };
+                let l = self.create_pango_layout(None);
+                l.set_markup(&format!("<span size='{}' weight='700'>{text}</span>", if g.icon >= 48.0 { "small" } else { "x-small" }));
+                let (lw, lh) = (l.pixel_size().0 as f64 + 6.0, l.pixel_size().1 as f64);
+                let bx = if right { ix + g.icon - lw + 2.0 } else { ix - 2.0 };
+                let r = rect(bx, iy + g.icon - lh + 2.0, lw, lh);
+                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(r, lh as f32 / 2.0));
+                snap.append_color(&accent, &r);
+                snap.pop();
+                snap.save();
+                snap.translate(&graphene::Point::new((bx + 3.0) as f32, (iy + g.icon - lh + 2.0) as f32));
+                snap.append_layout(&l, &gdk::RGBA::WHITE);
+                snap.restore();
+            }
 
             let text = self.text_for(idx, &g, name_w);
             let th = text.name.pixel_size().1 as f64;
@@ -544,14 +678,43 @@ impl Canvas {
             }
         }
 
+        // Group headers: chevron, title, count and a rule.
+        if g.hdr > 0.0 {
+            let border = style.lookup_color("kolphin_border").unwrap_or(alpha(&fg, 0.12));
+            let m = self.model();
+            let (a0, a1) = if g.horizontal { (sx, sx + w) } else { (sy, sy + h) };
+            for (sec, info) in g.secs.iter().zip(&m.sections) {
+                if sec.off + sec.extent < a0 || sec.off > a1 {
+                    continue;
+                }
+                let (hx, hy, hw) = if g.horizontal { (sec.off - sx, 0.0, sec.extent) } else { (0.0, sec.off - sy, w) };
+                let l = self.create_pango_layout(None);
+                let chevron = if info.collapsed { "▸" } else { "▾" };
+                l.set_markup(&format!(
+                    "<span foreground='#8b91a1'>{chevron}</span>  <b>{}</b>  <span foreground='#5f6677' size='small'>{}</span>",
+                    glib::markup_escape_text(&info.title),
+                    info.count
+                ));
+                l.set_width(((hw - 24.0).max(1.0) * pango::SCALE as f64) as i32);
+                l.set_ellipsize(pango::EllipsizeMode::End);
+                snap.save();
+                snap.translate(&graphene::Point::new((hx + 12.0) as f32, (hy + (g.hdr - l.pixel_size().1 as f64) / 2.0) as f32));
+                snap.append_layout(&l, &fg);
+                snap.restore();
+                snap.append_color(&border, &rect(hx + 12.0, hy + g.hdr - 4.0, hw - 24.0, 1.0));
+            }
+        }
+
         if self.mode() == ViewMode::Details {
             let bg = style.lookup_color("view_bg_color").unwrap_or(gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
             snap.append_color(&bg, &rect(0.0, 0.0, w, HEADER_H));
             let border = style.lookup_color("kolphin_border").unwrap_or(alpha(&fg, 0.12));
             snap.append_color(&border, &rect(0.0, HEADER_H - 1.0, w, 1.0));
-            for (title, x) in [("NAME", name_x), ("SIZE", size_x), ("MODIFIED", date_x + 12.0), ("TYPE", type_x + 8.0)] {
+            let (sort, desc) = (self.model().sort, self.model().desc);
+            for (title, x, key) in [("NAME", name_x, SortBy::Name), ("SIZE", size_x, SortBy::Size), ("MODIFIED", date_x + 12.0, SortBy::Modified), ("TYPE", type_x + 8.0, SortBy::Type)] {
                 let l = self.create_pango_layout(None);
-                l.set_markup(&format!("<span size='small' weight='600' letter_spacing='800'>{title}</span>"));
+                let arrow = if key == sort { if desc { " ▼" } else { " ▲" } } else { "" };
+                l.set_markup(&format!("<span size='small' weight='600' letter_spacing='800'>{title}{arrow}</span>"));
                 if title == "SIZE" {
                     l.set_width(((SIZE_W - 12.0) * pango::SCALE as f64) as i32);
                     l.set_alignment(pango::Alignment::Right);
@@ -563,7 +726,9 @@ impl Canvas {
             }
         }
 
-        self.request_thumbs(first.min(len), last.min(len), (g.icon * scale).round() as u32);
+        if let (Some(&first), Some(&last)) = (visible.first(), visible.last()) {
+            self.request_thumbs(first, last + 1, (g.icon * scale).round() as u32);
+        }
 
         if let Some(b) = imp.band.borrow().as_ref() {
             let (x0, y0) = (b.start.0.min(b.cur.0) - sx, b.start.1.min(b.cur.1) - sy);
@@ -762,9 +927,7 @@ impl Canvas {
 
     fn on_scroll(&self, ctl: &gtk::EventControllerScroll, dx: f64, dy: f64) -> glib::Propagation {
         if ctl.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
-            if self.mode() == ViewMode::Icons {
-                self.zoom_by(if dy < 0.0 { 1.15 } else { 1.0 / 1.15 });
-            }
+            self.zoom_by(dy < 0.0);
             return glib::Propagation::Stop;
         }
         let adj = self.scroll_adj();
@@ -841,6 +1004,31 @@ impl Canvas {
         let imp = self.imp();
         let state = g.current_event_state();
         let (ctrl, shift) = (state.contains(gdk::ModifierType::CONTROL_MASK), state.contains(gdk::ModifierType::SHIFT_MASK));
+        if g.current_button() == 1 && self.mode() == ViewMode::Details && y < HEADER_H {
+            let w = self.width() as f64;
+            let type_x = w - TYPE_W - 8.0;
+            let key = match x {
+                x if x >= type_x => SortBy::Type,
+                x if x >= type_x - DATE_W => SortBy::Modified,
+                x if x >= type_x - DATE_W - SIZE_W => SortBy::Size,
+                _ => SortBy::Name,
+            };
+            self.emit(Action::SortBy(key));
+            return;
+        }
+        if let (1, Some(Hit::Header(i))) = (g.current_button(), self.hit_any(x, y)) {
+            let title = self.model().sections.get(i).map(|s| s.title.clone());
+            if let Some(title) = title {
+                self.update(|m| {
+                    if !m.collapsed.remove(&title) {
+                        m.collapsed.insert(title);
+                    }
+                    m.rebuild_order();
+                });
+                self.emit(Action::ViewChanged);
+            }
+            return;
+        }
         let hit = self.hit(x, y).map(|p| (p, self.model().order[p]));
         imp.pending_select.set(None);
         match (g.current_button(), hit) {
@@ -894,25 +1082,12 @@ impl Canvas {
         let mut band = imp.band.borrow_mut();
         let Some(b) = band.as_mut() else { return };
         b.cur = cur;
-        let (x0, x1) = (b.start.0.min(cur.0), b.start.0.max(cur.0));
-        let (y0, y1) = ((b.start.1.min(cur.1) - g.top).max(0.0), b.start.1.max(cur.1) - g.top);
+        let hits = g.items_in(b.start.0.min(cur.0), b.start.1.min(cur.1), b.start.0.max(cur.0), b.start.1.max(cur.1));
         let mut m = imp.model.borrow_mut();
         m.selected.copy_from_slice(&b.base);
-        if y1 >= 0.0 {
-            let (c0, mut c1) = ((x0 / g.cell_w) as usize, (x1 / g.cell_w) as usize);
-            let (r0, mut r1) = ((y0 / g.cell_h) as usize, (y1 / g.cell_h) as usize);
-            if g.horizontal {
-                r1 = r1.min(g.rows - 1);
-            } else {
-                c1 = c1.min(g.cols - 1);
-            }
-            for row in r0..=r1 {
-                for col in c0..=c1 {
-                    if let Some(&i) = m.order.get(g.at(col, row)) {
-                        m.selected[i as usize] = true;
-                    }
-                }
-            }
+        for p in hits {
+            let i = m.order[p] as usize;
+            m.selected[i] = true;
         }
         drop(m);
         drop(band);
@@ -966,6 +1141,15 @@ impl Canvas {
                         m.selected[idx] = true;
                     }
                 });
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::c | gdk::Key::x | gdk::Key::v if ctrl => {
+                let action = match key {
+                    gdk::Key::c => "win.copy",
+                    gdk::Key::x => "win.cut",
+                    _ => "win.paste",
+                };
+                let _ = self.activate_action(action, None);
                 return glib::Propagation::Stop;
             }
             gdk::Key::Escape => {

@@ -37,16 +37,19 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - Số luồng theo loại ổ (`/sys/block/*/queue/rotational`): HDD 1–2, SSD nhiều.
 - JPEG giải mã thu nhỏ 1/8, ưu tiên thumbnail EXIF; video qua ffmpeg; cache chuẩn freedesktop `~/.cache/thumbnails`.
 
-### M3 — Group / sort / hiển thị
-- Group by name / time / type / extension / size / **kích thước ảnh (W×H)**; thu gọn từng nhóm; sort trong từng nhóm.
+### M3 — Group / sort / hiển thị (phần lõi ✅ v0.4.0)
+- ✅ Group by name / time / type / extension / size; thu gọn từng nhóm; sort trong từng nhóm. Còn: group theo **kích thước ảnh (W×H)**.
+- ✅ Badge symlink (↪) / hardlink (×N).
 - Cột kích thước ảnh (chỉ đọc header).
-- Thanh trượt cỡ icon + Ctrl+lăn chuột.
-- Lưu chế độ xem / sort / group / nhóm đã thu gọn cho từng folder.
-- Lọc nhanh (Ctrl+I), chọn theo glob/regex, lấy mẫu ngẫu nhiên N file.
+- ✅ Thanh trượt cỡ icon + Ctrl+lăn chuột.
+- ✅ Lưu chế độ xem / sort / group / nhóm đã thu gọn cho từng folder.
+- ✅ Lọc nhanh (Ctrl+I, chữ hoặc `*.jpg`). Còn: chọn theo glob/regex, lấy mẫu ngẫu nhiên N file.
 - Thống kê thư mục: số file theo đuôi, histogram dung lượng; dung lượng folder đệ quy (nền, huỷ được).
 - Đổi icon cho file/folder bằng cách chọn trong bộ Material.
 
 ### M4 — Thao tác file
+- ✅ Cut/Copy/Paste cơ bản (clipboard chung với Nautilus).
+- Tạo symlink / hardlink.
 - Hàng đợi copy/move: pause/resume, xử lý trùng tên, tốc độ; copy giữa các HDD chạy tuần tự; tuỳ chọn kiểm tra lại bằng xxHash sau copy.
 - Trash/xoá/đổi tên, **Ctrl+Z undo**, đổi tên hàng loạt có xem trước (regex).
 - Kéo thả vào/ra app khác.
