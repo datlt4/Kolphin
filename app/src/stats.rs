@@ -48,7 +48,9 @@ pub fn show(parent: &gtk::Window, dir: &Path, m: &Model) {
     body.append(&line("Files", &files.to_string()).0);
     body.append(&line("Folders", &dirs.to_string()).0);
     body.append(&line("Size of files", &glib::format_size(bytes)).0);
-    let (rec_row, rec) = line("Total size, all subfolders", "Computing…");
+    let (rec_row, rec) = line("Total size, all subfolders", "");
+    let calc = gtk::Button::builder().label("Calculate").css_classes(["flat"]).build();
+    rec_row.append(&calc);
     body.append(&rec_row);
 
     body.append(&section("BY EXTENSION"));
@@ -68,16 +70,20 @@ pub fn show(parent: &gtk::Window, dir: &Path, m: &Model) {
         body.append(&row);
     }
 
-    // Recursive size: walker thread reports every 200 ms; closing the window stops it.
+    // Recursive size on demand: walker thread reports every 200 ms; closing the window stops it.
     let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = async_channel::unbounded::<(u64, u64, bool)>();
-    let root = dir.to_path_buf();
-    let stop = cancel.clone();
-    std::thread::spawn(move || walk(&root, &stop, &tx));
-    glib::spawn_future_local(glib::clone!(#[weak] rec, async move {
-        while let Ok((n, size, done)) = rx.recv().await {
-            rec.set_text(&format!("{}{} · {n} files", glib::format_size(size), if done { "" } else { "…" }));
-        }
+    let (root, stop) = (dir.to_path_buf(), cancel.clone());
+    calc.connect_clicked(glib::clone!(#[weak] rec, move |b| {
+        b.set_visible(false);
+        rec.set_text("Computing…");
+        let (tx, rx) = async_channel::unbounded::<(u64, u64, bool)>();
+        let (root, stop) = (root.clone(), stop.clone());
+        std::thread::spawn(move || walk(&root, &stop, &tx));
+        glib::spawn_future_local(glib::clone!(#[weak] rec, async move {
+            while let Ok((n, size, done)) = rx.recv().await {
+                rec.set_text(&format!("{}{} · {n} files", glib::format_size(size), if done { "" } else { "…" }));
+            }
+        }));
     }));
     win.connect_close_request(move |_| {
         cancel.store(true, Ordering::Relaxed);

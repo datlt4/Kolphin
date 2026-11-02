@@ -425,9 +425,9 @@ impl Win {
                 let p = paths.clone();
                 let res = gio::spawn_blocking(move || ops::trash(&p)).await.unwrap_or_else(|_| Err("trash crashed".into()));
                 let msg = match res {
-                    Ok(()) => {
-                        let n = paths.len();
-                        ops::record(ops::Undo::Trashed(paths));
+                    Ok(items) => {
+                        let n = items.len();
+                        ops::record(ops::Undo::Trashed(items));
                         format!("Moved {n} item(s) to the trash · Ctrl+Z to undo")
                     }
                     Err(e) => format!("Trash failed: {e}"),

@@ -13,8 +13,14 @@ pub enum Undo {
     Moved(Vec<(PathBuf, PathBuf)>),
     /// New files or folders (copies, links, new folders); undo trashes them.
     Created(Vec<PathBuf>),
-    /// Original paths of items sent to the trash; undo restores them.
-    Trashed(Vec<PathBuf>),
+    /// Items sent to the trash; undo restores them.
+    Trashed(Vec<Trashed>),
+}
+
+pub struct Trashed {
+    pub orig: PathBuf,
+    /// Where Kolphin put it itself (volume trash GIO refused); None = GIO's trash.
+    pub at: Option<PathBuf>,
 }
 
 thread_local! {
@@ -39,22 +45,93 @@ pub fn undo() -> Result<String, String> {
             trash(&paths)?;
             Ok(format!("Removed {} created item(s) (they are in the trash)", paths.len()))
         }
-        Undo::Trashed(paths) => {
-            let n = restore(&paths)?;
+        Undo::Trashed(items) => {
+            let n = restore(&items)?;
             Ok(format!("Restored {n} item(s) from the trash"))
         }
     }
 }
 
-pub fn trash(paths: &[PathBuf]) -> Result<(), String> {
+pub fn trash(paths: &[PathBuf]) -> Result<Vec<Trashed>, String> {
+    let mut done = Vec::new();
     for p in paths {
-        gio::File::for_path(p).trash(None::<&gio::Cancellable>).map_err(|e| format!("{}: {e}", p.display()))?;
+        let at = match gio::File::for_path(p).trash(None::<&gio::Cancellable>) {
+            Ok(_) => None,
+            // GIO refuses a volume trash it doesn't own (e.g. NTFS/exFAT mounts where everything is root's).
+            Err(e) => Some(trash_on_volume(p).map_err(|e2| format!("{}: {e} ({e2})", p.display()))?),
+        };
+        done.push(Trashed { orig: p.clone(), at });
     }
-    Ok(())
+    Ok(done)
 }
 
-/// Put trashed items back where they were (the newest trash entry for each path).
-fn restore(paths: &[PathBuf]) -> Result<usize, String> {
+/// Move into `<mount top>/.Trash-<uid>` (freedesktop layout): a rename, so instant.
+fn trash_on_volume(p: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = p.parent().ok_or("no parent")?.canonicalize().map_err(|e| e.to_string())?;
+    let real = parent.join(p.file_name().ok_or("no name")?);
+    let dev = std::fs::metadata(&parent).map_err(|e| e.to_string())?.dev();
+    let mut top = parent.as_path();
+    while let Some(up) = top.parent() {
+        if std::fs::metadata(up).map(|m| m.dev()).ok() != Some(dev) {
+            break;
+        }
+        top = up;
+    }
+    trash_into(&top.join(format!(".Trash-{}", uid())), &real)
+}
+
+fn uid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:"))?.split_whitespace().nth(1)?.parse().ok())
+        .unwrap_or(1000)
+}
+
+fn trash_into(trash_dir: &Path, real: &Path) -> Result<PathBuf, String> {
+    let (files, info) = (trash_dir.join("files"), trash_dir.join("info"));
+    std::fs::create_dir_all(&files).and_then(|_| std::fs::create_dir_all(&info)).map_err(|e| e.to_string())?;
+    let base = real.file_name().ok_or("no name")?.to_string_lossy().into_owned();
+    let name = (1..)
+        .map(|n| if n == 1 { base.clone() } else { format!("{base}.{n}") })
+        .find(|n| std::fs::symlink_metadata(files.join(n)).is_err() && std::fs::symlink_metadata(info.join(format!("{n}.trashinfo"))).is_err())
+        .unwrap();
+    let date = glib::DateTime::now_local().ok().and_then(|d| d.format("%Y-%m-%dT%H:%M:%S").ok()).map(|d| d.to_string()).unwrap_or_default();
+    let escaped = glib::Uri::escape_string(&real.to_string_lossy(), Some("/"), false);
+    let info_file = info.join(format!("{name}.trashinfo"));
+    std::fs::write(&info_file, format!("[Trash Info]\nPath={escaped}\nDeletionDate={date}\n")).map_err(|e| e.to_string())?;
+    let at = files.join(&name);
+    if let Err(e) = std::fs::rename(real, &at) {
+        let _ = std::fs::remove_file(&info_file);
+        return Err(e.to_string());
+    }
+    Ok(at)
+}
+
+/// Put trashed items back where they were.
+fn restore(items: &[Trashed]) -> Result<usize, String> {
+    let mut n = 0;
+    let mut via_gio = Vec::new();
+    for t in items {
+        match &t.at {
+            Some(at) => {
+                std::fs::rename(at, &t.orig).map_err(|e| format!("{}: {e}", t.orig.display()))?;
+                if let (Some(dir), Some(name)) = (at.parent().and_then(Path::parent), at.file_name()) {
+                    let _ = std::fs::remove_file(dir.join("info").join(format!("{}.trashinfo", name.to_string_lossy())));
+                }
+                n += 1;
+            }
+            None => via_gio.push(t.orig.clone()),
+        }
+    }
+    if !via_gio.is_empty() {
+        n += restore_gio(&via_gio)?;
+    }
+    Ok(n)
+}
+
+/// Restore from GIO's trash: the newest entry for each original path.
+fn restore_gio(paths: &[PathBuf]) -> Result<usize, String> {
     let trash = gio::File::for_uri("trash:///");
     let list = trash
         .enumerate_children("standard::name,trash::orig-path,trash::deletion-date", gio::FileQueryInfoFlags::NONE, None::<&gio::Cancellable>)
@@ -324,6 +401,14 @@ mod tests {
         assert!(matches!(wait(transfer(vec![a.join("sub")], b.clone(), true)), Ok(Undo::Moved(_))));
         assert!(!a.join("sub").exists() && b.join("sub (copy)/g.txt").exists());
         assert!(wait(transfer(vec![b.clone()], b.join("sub"), false)).is_err());
+
+        // Volume-trash fallback round trip.
+        let tdir = root.join(".Trash-test");
+        let at = trash_into(&tdir, &b.join("link")).unwrap();
+        assert!(!b.join("link").is_symlink() && at.is_symlink());
+        assert!(std::fs::read_to_string(tdir.join("info/link.trashinfo")).unwrap().contains("Path="));
+        assert_eq!(restore(&[Trashed { orig: b.join("link"), at: Some(at) }]), Ok(1));
+        assert!(b.join("link").is_symlink() && !tdir.join("info/link.trashinfo").exists());
 
         let renamed = rename(&b.join("f.txt"), "h.txt").unwrap();
         assert!(renamed.exists() && rename(&renamed, "f (copy).txt").is_err());

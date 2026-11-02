@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "kolphin"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-channel",
  "gtk4",
