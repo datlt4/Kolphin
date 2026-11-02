@@ -72,6 +72,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 
 ### M7 — Drop Shelf ✅ (v0.9.0)
 - ✅ Giữ chuột trái + lắc ngang (≥4 lần đổi hướng trong 0,7 s) → kệ hiện cạnh con trỏ, luôn nổi trên cùng (X11, theo dõi chuột toàn màn hình qua XQueryPointer). Kệ giữ đường dẫn, kéo ra một lần là xong; Copy here / Move here vào thư mục đang mở; Ctrl+Shift+D mở kệ thủ công (cả Wayland).
+- ✅ (v0.13.0) Giao diện kiểu Dropover: thẻ bo tròn trong suốt, ảnh xếp chồng nghiêng, nhãn "2 Images ⌄" mở danh sách (kéo từng file ra, nút ✕ bỏ khỏi kệ), menu ⋯ Copy/Move/Clear; **nhiều kệ cùng lúc**; kéo vùng trống để dời kệ.
 
 ### M8 — Tích hợp hệ thống (phần lớn ✅ v0.10.0)
 - ✅ Đặt làm file manager mặc định (`xdg-mime` + D-Bus `org.freedesktop.FileManager1` cho "Show in folder"; hoàn tác được).

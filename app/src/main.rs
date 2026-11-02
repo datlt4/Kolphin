@@ -59,6 +59,7 @@ const CSS: &str = "
 @define-color kolphin_hover_strong #2c3243;
 
 window.background { background: @window_bg_color; }
+window.shelf-window.background { background: transparent; }
 headerbar { box-shadow: inset 0 -1px @kolphin_border; min-height: 46px; }
 headerbar button { border-radius: 8px; }
 headerbar button:hover { background: @kolphin_hover_strong; color: #ffffff; box-shadow: inset 0 0 0 1px #3a4153; }
@@ -106,8 +107,19 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .palette row:selected { background: alpha(@accent_color, 0.18); }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
-.shelf { padding: 12px; background: @kolphin_side; border: 1px solid @kolphin_border; border-radius: 14px; }
-.shelf-list { background: @kolphin_elev; border-radius: 10px; padding: 6px; min-height: 120px; }
+.shelf { margin: 10px; background: rgba(32,35,45,0.96); border: 1px solid rgba(255,255,255,0.09); border-radius: 22px; box-shadow: 0 4px 10px rgba(0,0,0,0.45); }
+.shelf.drop-hover { border-color: @accent_color; background: rgba(40,48,70,0.97); }
+.shelf-round { min-width: 26px; min-height: 26px; padding: 0; margin: 9px; border-radius: 99px; background: rgba(255,255,255,0.16); box-shadow: none; }
+.shelf-round > button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 99px; background: rgba(255,255,255,0.16); }
+.shelf-round:hover, .shelf-round > button:hover { background: rgba(255,255,255,0.28); }
+.shelf-pill { margin-bottom: 12px; }
+.shelf-pill > button { min-height: 0; padding: 3px 8px 3px 12px; border-radius: 99px; background: rgba(255,255,255,0.13); font-size: 12px; }
+.shelf-pill > button:hover { background: rgba(255,255,255,0.24); }
+.shelf-hint { color: @kolphin_muted; margin-top: 10px; }
+.shelf-row { padding: 4px 6px; border-radius: 6px; }
+.shelf-row:hover { background: alpha(@accent_color, 0.18); }
+.shelf-remove { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
+.shelf-remove:hover { opacity: 1; background: rgba(255,255,255,0.14); }
 .toast { padding: 8px 8px 8px 16px; border-radius: 12px; background: #262b38; color: #e6e8ee; border: 1px solid #363c4b; box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
 .filterbar button:checked { background: alpha(@accent_color, 0.22); color: #ffffff; box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.6); }
 .filterbar { margin: 0 12px 6px; }

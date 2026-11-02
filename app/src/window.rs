@@ -148,6 +148,13 @@ pub fn reveal(app: &adw::Application, items: &[PathBuf], properties: bool) {
 }
 
 /// Remember every window's tabs (called when the app quits, e.g. to restart after an update).
+/// Copy/Move from a Drop Shelf into the active folder of the last focused window.
+pub fn shelf_transfer(items: Vec<PathBuf>, cut: bool) {
+    if let Some(win) = WINDOWS.with(|w| w.borrow().last().cloned()) {
+        clipboard::run_transfer(&win.toasts, items, win.pane().path(), cut);
+    }
+}
+
 pub fn save_sessions() {
     WINDOWS.with(|w| {
         if let Some(win) = w.borrow().last() {
@@ -301,6 +308,18 @@ impl Win {
                 glib::Propagation::Proceed
             }
         ));
+        // The last focused window is the one shelves copy into.
+        win.window.connect_is_active_notify(glib::clone!(#[strong] weak, move |w| {
+            if w.is_active() {
+                WINDOWS.with(|ws| {
+                    let mut ws = ws.borrow_mut();
+                    if let Some(i) = ws.iter().position(|x| std::ptr::eq(Rc::as_ptr(x), weak.as_ptr())) {
+                        let me = ws.remove(i);
+                        ws.push(me);
+                    }
+                });
+            }
+        }));
         win.window.connect_destroy(glib::clone!(#[strong] weak, move |_| {
             WINDOWS.with(|w| w.borrow_mut().retain(|x| !std::ptr::eq(Rc::as_ptr(x), weak.as_ptr())));
         }));
@@ -666,15 +685,7 @@ impl Win {
         add("palette", |w| palette::show(w.window.upcast_ref()));
         add("shelf", |w| {
             if let Some(app) = w.window.application() {
-                let shelf = shelf::get(&app);
-                // Copy/Move from the shelf land in this window's active folder.
-                let weak = w.weak();
-                *shelf.on_transfer.borrow_mut() = Some(Box::new(move |items, cut| {
-                    if let Some(win) = weak.upgrade() {
-                        clipboard::run_transfer(&win.toasts, items, win.pane().path(), cut);
-                    }
-                }));
-                shelf.toggle();
+                shelf::open(&app);
             }
         });
         add("terminal", |w| {
