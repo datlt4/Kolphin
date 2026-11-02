@@ -58,6 +58,7 @@ pub struct Win {
 
 thread_local! {
     static WINDOWS: RefCell<Vec<Rc<Win>>> = const { RefCell::new(Vec::new()) };
+    static VOLUME_MONITOR: RefCell<Option<gio::VolumeMonitor>> = const { RefCell::new(None) };
     static UPDATE_CHECKED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -215,7 +216,7 @@ impl Win {
 
         let tabs = adw::TabView::new();
         // Tabs live in the header, in place of the window title (like Kermius).
-        let tab_bar = adw::TabBar::builder().view(&tabs).autohide(false).hexpand(true).build();
+        let tab_bar = adw::TabBar::builder().view(&tabs).autohide(false).expand_tabs(false).hexpand(true).valign(gtk::Align::Center).build();
         header.set_title_widget(Some(&tab_bar));
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
         main.append(&tabs);
@@ -530,7 +531,10 @@ impl Win {
         add("forward", |w| w.pane().go_forward());
         add("up", |w| w.pane().go_up());
         add("home", |w| w.pane().navigate(glib::home_dir()));
-        add("reload", |w| w.pane().reload());
+        add("reload", |w| {
+            w.pane().reload();
+            w.fill_places();
+        });
         add("location", |w| w.pane().pathbar.edit());
         add("new-tab", |w| w.add_tab(w.pane().path()));
         add("close-tab", |w| {
@@ -1029,7 +1033,9 @@ impl Win {
         });
         self.places.add_controller(drop);
 
+        // GIO drops the monitor (and its signals) once nobody holds it: keep it for the app's life.
         let monitor = gio::VolumeMonitor::get();
+        VOLUME_MONITOR.with(|m| *m.borrow_mut() = Some(monitor.clone()));
         let w = self.weak();
         let refresh = move || {
             if let Some(win) = w.upgrade() {
@@ -1040,7 +1046,10 @@ impl Win {
         monitor.connect_mount_removed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
         monitor.connect_mount_changed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
         monitor.connect_volume_added(glib::clone!(#[strong] refresh, move |_, _| refresh()));
-        monitor.connect_volume_removed(move |_, _| refresh());
+        monitor.connect_volume_changed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
+        monitor.connect_volume_removed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
+        monitor.connect_drive_connected(glib::clone!(#[strong] refresh, move |_, _| refresh()));
+        monitor.connect_drive_disconnected(move |_, _| refresh());
         self.fill_places();
         // Look for LAN hosts now and every minute.
         let w = self.weak();
@@ -1135,8 +1144,9 @@ impl Win {
             let row = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
             row.append(&line);
             if let Some((free, size)) = usage {
-                let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(1.0 - free as f64 / size as f64).css_classes(["usage"]).build();
-                bar.set_tooltip_text(Some(&format!("{} free of {}", glib::format_size(free), glib::format_size(size))));
+                let used = 1.0 - free as f64 / size as f64;
+                let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(used).css_classes(["usage"]).build();
+                row.set_tooltip_text(Some(&format!("{:.0}% used · {} free of {}", used * 100.0, glib::format_size(free), glib::format_size(size))));
                 row.append(&bar);
             }
             self.places.append(&row);

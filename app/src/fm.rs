@@ -49,7 +49,8 @@ pub fn serve(app: &adw::Application) {
     let _ = gio::bus_own_name(
         gio::BusType::Session,
         NAME,
-        gio::BusNameOwnerFlags::ALLOW_REPLACEMENT | gio::BusNameOwnerFlags::REPLACE,
+        // A dev build never takes the name from the installed app.
+        if cfg!(debug_assertions) { gio::BusNameOwnerFlags::ALLOW_REPLACEMENT } else { gio::BusNameOwnerFlags::ALLOW_REPLACEMENT | gio::BusNameOwnerFlags::REPLACE },
         move |conn, _| {
             let Ok(node) = gio::DBusNodeInfo::for_xml(XML) else { return };
             let Some(iface) = node.lookup_interface(NAME) else { return };

@@ -87,8 +87,10 @@ headerbar { background: @kolphin_side; }
 paned > separator { min-width: 1px; min-height: 1px; margin: 0; padding: 0; background: @kolphin_border; background-image: none; box-shadow: none; }
 headerbar .linked > button:not(:checked):not(:hover) { background: none; box-shadow: none; }
 
-tabbar .box { background: none; border: none; box-shadow: none; padding: 0; }
-tabbar tab { border-radius: 8px; margin: 4px 2px; min-height: 30px; color: @kolphin_muted; }
+tabbar .box { background: none; border: none; box-shadow: none; padding: 0; min-height: 0; }
+tabbar tabbox > background { background: none; box-shadow: none; }
+tabbar tab { border-radius: 7px; margin: 0 2px; padding: 0 4px 0 8px; min-height: 28px; font-size: 13px; color: @kolphin_muted; }
+tabbar tab button.image-button { min-width: 20px; min-height: 20px; }
 tabbar tab:hover:not(:selected):not(:checked) { background: @kolphin_hover_strong; color: #ffffff; }
 tabbar tab, tabbar tab:backdrop { background: none; box-shadow: none; }
 tabbar tab:selected, tabbar tab:checked { background: #262b38; color: #ffffff; box-shadow: inset 0 0 0 1px #363c4b; }
@@ -116,7 +118,8 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .shelf-pill > button { min-height: 0; padding: 3px 8px 3px 12px; border-radius: 99px; background: rgba(255,255,255,0.13); font-size: 12px; }
 .shelf-pill > button:hover { background: rgba(255,255,255,0.24); }
 .shelf-hint { color: @kolphin_muted; margin-top: 10px; }
-.shelf-row { padding: 4px 6px; border-radius: 6px; }
+.shelf-list, .shelf-list > row { background: none; padding: 0; }
+.shelf-row { min-height: 26px; padding: 4px 6px; border-radius: 6px; }
 .shelf-row:hover { background: alpha(@accent_color, 0.18); }
 .shelf-remove { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
 .shelf-remove:hover { opacity: 1; background: rgba(255,255,255,0.14); }

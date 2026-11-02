@@ -88,7 +88,14 @@ impl PathBar {
         ));
         bar.entry.add_controller(keys);
         let focus = gtk::EventControllerFocus::new();
-        focus.connect_leave(glib::clone!(#[weak] bar, move |_| bar.show_crumbs()));
+        // Only when focus moved elsewhere in the window: a short keyboard grab (GNOME's "locate pointer" on Ctrl)
+        // also sends a focus-out.
+        focus.connect_leave(glib::clone!(#[weak] bar, move |_| {
+            let still_here = bar.entry.root().and_then(|r| r.focus()).is_some_and(|f| f.is_ancestor(&bar.entry));
+            if !still_here {
+                bar.show_crumbs();
+            }
+        }));
         bar.entry.add_controller(focus);
         bar
     }

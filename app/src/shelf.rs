@@ -19,7 +19,9 @@ pub struct Shelf {
     hint: gtk::Label,
     pill: gtk::MenuButton,
     pill_label: gtk::Label,
-    list: gtk::Box,
+    /// Row i of the item list shows items[i].
+    rows: gtk::StringList,
+    scroll: gtk::ScrolledWindow,
     items: RefCell<Vec<PathBuf>>,
     /// Pictures for the stack: thumbnails of images/videos, icons otherwise.
     pics: RefCell<HashMap<PathBuf, cairo::ImageSurface>>,
@@ -34,6 +36,10 @@ pub struct Shelf {
     /// Opened by the shortcut: don't auto-close while empty.
     pinned: Cell<bool>,
 }
+
+/// Item list: row height and the tallest it grows before scrolling.
+const ROW_PX: i32 = 34;
+const MAX_LIST_PX: i32 = 320;
 
 thread_local! {
     static SHELVES: RefCell<Vec<Rc<Shelf>>> = const { RefCell::new(Vec::new()) };
@@ -112,8 +118,10 @@ impl Shelf {
         let pill_box = gtk::Box::builder().spacing(4).build();
         pill_box.append(&pill_label);
         pill_box.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
-        let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).width_request(260).build();
-        let scroll = gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).propagate_natural_height(true).max_content_height(320).build();
+        let rows = gtk::StringList::new(&[]);
+        let factory = gtk::SignalListItemFactory::new();
+        let view = gtk::ListView::builder().model(&gtk::NoSelection::new(Some(rows.clone()))).factory(&factory).width_request(260).css_classes(["shelf-list"]).build();
+        let scroll = gtk::ScrolledWindow::builder().child(&view).hscrollbar_policy(gtk::PolicyType::Never).min_content_height(MAX_LIST_PX).build();
         let pill = gtk::MenuButton::builder().popover(&gtk::Popover::builder().child(&scroll).build()).halign(gtk::Align::Center).css_classes(["shelf-pill"]).build();
         pill.set_child(Some(&pill_box));
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
@@ -142,7 +150,8 @@ impl Shelf {
             hint,
             pill,
             pill_label,
-            list,
+            rows,
+            scroll,
             items: Default::default(),
             pics: Default::default(),
             requested: Default::default(),
@@ -163,6 +172,37 @@ impl Shelf {
         shelf.stack.set_draw_func(glib::clone!(#[strong] weak, move |_, cr, w, h| {
             if let Some(s) = weak.upgrade() {
                 s.draw(cr, w, h);
+            }
+        }));
+        factory.connect_setup(glib::clone!(#[strong] weak, move |_, item| {
+            let (Some(s), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+            let row = gtk::Box::builder().spacing(8).css_classes(["shelf-row"]).build();
+            row.append(&gtk::Image::builder().pixel_size(24).build());
+            row.append(&gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).xalign(0.0).hexpand(true).build());
+            // Takes it off the shelf; the file stays where it is.
+            let remove = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Remove from shelf").css_classes(["flat", "circular", "shelf-remove"]).build();
+            let li = item.downgrade();
+            remove.connect_clicked(glib::clone!(#[strong] weak, #[strong] li, move |_| {
+                if let (Some(s), Some(i)) = (weak.upgrade(), li.upgrade()) {
+                    if let Some(p) = s.path_at(&i) {
+                        s.remove(&[p]);
+                    }
+                }
+            }));
+            row.append(&remove);
+            // One file at a time out of the list.
+            drag_out(&row, &s, move |s| li.upgrade().and_then(|i| s.path_at(&i)).into_iter().collect(), |s, taken| s.remove(&taken));
+            item.set_child(Some(&row));
+        }));
+        factory.connect_bind(glib::clone!(#[strong] weak, move |_, item| {
+            let (Some(s), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+            let (Some(p), Some(row)) = (s.path_at(item), item.child()) else { return };
+            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if let Some(img) = row.first_child().and_downcast::<gtk::Image>() {
+                img.set_paintable(icons::texture(icons::icon_name(&name, p.is_dir()), 48).as_ref());
+            }
+            if let Some(label) = row.first_child().and_then(|c| c.next_sibling()).and_downcast::<gtk::Label>() {
+                label.set_text(&name);
             }
         }));
         close.connect_clicked(glib::clone!(#[strong] weak, move |_| {
@@ -212,8 +252,9 @@ impl Shelf {
                 let (Some(s), Ok(list)) = (weak.upgrade(), value.get::<gdk::FileList>()) else { return false };
                 s.card.remove_css_class("drop-hover");
                 let mut items = s.items.borrow_mut();
+                let mut seen: HashSet<PathBuf> = items.iter().cloned().collect();
                 for p in list.files().iter().filter_map(|f| f.path()) {
-                    if !items.contains(&p) {
+                    if seen.insert(p.clone()) {
                         items.push(p);
                     }
                 }
@@ -236,31 +277,11 @@ impl Shelf {
         self.hint.set_visible(items.is_empty());
         self.pill.set_visible(!items.is_empty());
         self.pill_label.set_text(&summary(&items));
-        while let Some(c) = self.list.first_child() {
-            self.list.remove(&c);
-        }
-        for p in items.iter() {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let row = gtk::Box::builder().spacing(8).css_classes(["shelf-row"]).build();
-            let img = gtk::Image::builder().pixel_size(24).build();
-            img.set_paintable(icons::texture(icons::icon_name(&name, p.is_dir()), 48).as_ref());
-            row.append(&img);
-            row.append(&gtk::Label::builder().label(&name).ellipsize(gtk::pango::EllipsizeMode::Middle).xalign(0.0).hexpand(true).build());
-            // Takes it off the shelf; the file stays where it is.
-            let remove = gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text("Remove from shelf").css_classes(["flat", "circular", "shelf-remove"]).build();
-            let weak = Rc::downgrade(self);
-            let one = p.clone();
-            remove.connect_clicked(move |_| {
-                if let Some(s) = weak.upgrade() {
-                    s.remove(std::slice::from_ref(&one));
-                }
-            });
-            row.append(&remove);
-            // One file at a time out of the list.
-            let one = p.clone();
-            drag_out(&row, self, move |_| vec![one.clone()], |s, taken| s.remove(&taken));
-            self.list.append(&row);
-        }
+        let n: Vec<String> = (0..items.len()).map(|i| i.to_string()).collect();
+        self.rows.splice(0, self.rows.n_items(), &n.iter().map(String::as_str).collect::<Vec<_>>());
+        // Short lists fit without a scrollbar (whose minimum length would pad the popover).
+        let fits = items.len() as i32 * ROW_PX <= MAX_LIST_PX;
+        self.scroll.set_vscrollbar_policy(if fits { gtk::PolicyType::Never } else { gtk::PolicyType::Automatic });
 
         // Pictures for the top three.
         let gen = self.gen.get() + 1;
@@ -287,6 +308,11 @@ impl Shelf {
         *self.requested.borrow_mut() = requested;
         thumbs::request(self.thumb_owner, jobs, &self.thumb_tx);
         self.stack.queue_draw();
+    }
+
+    fn path_at(&self, item: &gtk::ListItem) -> Option<PathBuf> {
+        let i: usize = item.item().and_downcast::<gtk::StringObject>()?.string().parse().ok()?;
+        self.items.borrow().get(i).cloned()
     }
 
     fn remove(self: &Rc<Self>, paths: &[PathBuf]) {
@@ -539,6 +565,9 @@ pub fn watch(app: &gtk::Application) {
         // SAFETY: XQueryPointer only writes the out-parameters.
         unsafe { (xl.XQueryPointer)(d, root, &mut rr, &mut cr, &mut rx, &mut ry, &mut wx, &mut wy, &mut mask) };
         let pressed = mask & xlib::Button1Mask != 0;
+        if pressed && released_at.is_some() {
+            close_menus_outside(cr);
+        }
         let now = Instant::now();
         let shelves = SHELVES.with(|l| l.borrow().clone());
         if shake.feed(rx, pressed, now) {
@@ -553,6 +582,27 @@ pub fn watch(app: &gtk::Application) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// GTK 4.6 on X11 keeps an open menu's pointer/keyboard grab when another app is clicked, so nothing else can
+/// get focus: close every open popover when a click lands outside it (`under` = top-level X window at the pointer).
+fn close_menus_outside(under: xlib::Window) {
+    fn walk(w: &gtk::Widget, under: xlib::Window) {
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if let Some(p) = c.downcast_ref::<gtk::Popover>().filter(|p| p.is_visible()) {
+                let xid = p.surface().and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok()).map(|s| s.xid());
+                if xid != Some(under) {
+                    p.popdown();
+                }
+            }
+            walk(&c, under);
+            child = c.next_sibling();
+        }
+    }
+    for w in gtk::Window::list_toplevels() {
+        walk(&w, under);
+    }
 }
 
 #[cfg(test)]

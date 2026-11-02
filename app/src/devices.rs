@@ -38,10 +38,11 @@ pub fn mount_volume(parent: &gtk::Window, vol: gio::Volume, done: impl FnOnce(Re
 pub fn eject(parent: &gtk::Window, m: gio::Mount, done: impl FnOnce(Result<(), String>) + 'static) {
     let op = gtk::MountOperation::new(Some(parent));
     let cb = move |res: Result<(), glib::Error>| done(res.map_err(|e| e.to_string()));
-    if m.can_eject() {
-        m.eject_with_operation(gio::MountUnmountFlags::NONE, Some(&op), None::<&gio::Cancellable>, cb);
-    } else {
+    // Unmount only (data is flushed, safe to unplug): the drive stays listed so a click mounts it again.
+    if m.can_unmount() {
         m.unmount_with_operation(gio::MountUnmountFlags::NONE, Some(&op), None::<&gio::Cancellable>, cb);
+    } else {
+        m.eject_with_operation(gio::MountUnmountFlags::NONE, Some(&op), None::<&gio::Cancellable>, cb);
     }
 }
 

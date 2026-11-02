@@ -35,6 +35,8 @@ pub enum Action {
 type ActionHandler = Box<dyn Fn(Action)>;
 
 const HEADER_H: f64 = 28.0;
+/// List modes: icon's left edge in its row (room for the selection checkbox before it).
+const LIST_ICON_X: f64 = 24.0;
 const GROUP_H: f64 = 38.0;
 const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
@@ -83,6 +85,10 @@ struct Geometry {
     horizontal: bool,
     cell_w: f64,
     cell_h: f64,
+    /// Width of the item's card inside its cell (Icons: around icon and name, leaving gaps to start a rubber band).
+    card_w: f64,
+    /// Space above and below the card inside its cell.
+    pad: f64,
     icon: f64,
     /// Details column header.
     top: f64,
@@ -98,6 +104,21 @@ enum Hit {
 }
 
 impl Geometry {
+    /// The card of an item whose cell starts at (x, y).
+    fn card(&self, x: f64, y: f64) -> (f64, f64, f64, f64) {
+        (x + (self.cell_w - self.card_w) / 2.0, y + self.pad, self.card_w, self.cell_h - 2.0 * self.pad)
+    }
+
+    /// Selection checkbox of the card at (x, y): left, top, size.
+    fn checkbox(&self, x: f64, y: f64) -> (f64, f64, f64) {
+        let (bx, by, _, bh) = self.card(x, y);
+        if self.cols > 1 || (self.cols == 1 && self.top == 0.0) {
+            (bx + 5.0, by + 5.0, 20.0)
+        } else {
+            (bx + 4.0, by + (bh - 16.0) / 2.0, 16.0)
+        }
+    }
+
     /// Content-space top-left corner of the item at position `p`.
     fn origin(&self, p: usize) -> (f64, f64) {
         let s = &self.secs[self.secs.partition_point(|s| s.start + s.len <= p).min(self.secs.len() - 1)];
@@ -125,6 +146,10 @@ impl Geometry {
                 return Some(Hit::Header(i));
             }
             let (col, row) = ((cx / self.cell_w) as usize, ((ly - self.hdr) / self.cell_h) as usize);
+            let (lx, lyc) = (cx - col as f64 * self.cell_w, ly - self.hdr - row as f64 * self.cell_h);
+            if (lx - self.cell_w / 2.0).abs() > self.card_w / 2.0 || lyc < self.pad || lyc > self.cell_h - self.pad {
+                return None;
+            }
             (col < self.cols).then_some(row * self.cols + col)?
         };
         (local < s.len).then_some(Hit::Item(s.start + local))
@@ -487,14 +512,14 @@ impl Canvas {
                 let icon = self.imp().zoom.get();
                 let cols = ((w / (icon + 48.0).max(104.0)) as usize).max(1);
                 let cell_h = icon + 2.0 * self.line_height() + 28.0;
-                Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, icon, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
+                Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, card_w: (w / cols as f64 - 8.0).min(icon + 56.0), pad: 4.0, icon, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
             ViewMode::Compact => {
                 let rows = (((h - 8.0 - hdr) / list_h) as usize).max(1);
                 let cell_w = 260.0 + (small - 22.0) * 2.0;
-                Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: list_h, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
+                Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: list_h, card_w: cell_w - 4.0, pad: 1.0, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
-            ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: list_h, icon: small, top: HEADER_H, hdr, secs: Vec::new(), total: 0.0 },
+            ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: list_h, card_w: w - 4.0, pad: 1.0, icon: small, top: HEADER_H, hdr, secs: Vec::new(), total: 0.0 },
         };
         let mut off = g.top;
         for s in &m.sections {
@@ -585,8 +610,8 @@ impl Canvas {
     fn text_for(&self, idx: u32, g: &Geometry, details_name_w: f64) -> Ref<'_, Text> {
         let imp = self.imp();
         let width = match self.mode() {
-            ViewMode::Icons => g.cell_w - 20.0,
-            ViewMode::Compact => g.cell_w - g.icon - 32.0,
+            ViewMode::Icons => g.card_w - 12.0,
+            ViewMode::Compact => g.cell_w - g.icon - LIST_ICON_X - 20.0,
             ViewMode::Details => details_name_w,
         };
         if imp.text_width.get() != width {
@@ -656,7 +681,7 @@ impl Canvas {
         let type_x = w - TYPE_W - 8.0;
         let date_x = type_x - DATE_W;
         let size_x = date_x - SIZE_W;
-        let name_x = 12.0 + g.icon + 8.0;
+        let name_x = LIST_ICON_X + g.icon + 8.0;
         let name_w = (size_x - name_x - 8.0).max(40.0);
 
         snap.push_clip(&rect(0.0, 0.0, w, h));
@@ -689,10 +714,8 @@ impl Canvas {
             };
             let (ox, oy) = g.origin(p);
             let (x, y) = (ox - sx, oy - sy);
-            let (bx, by, bw, bh, radius) = match self.mode() {
-                ViewMode::Icons => (x + 4.0, y + 4.0, g.cell_w - 8.0, g.cell_h - 8.0, 8.0),
-                _ => (x + 2.0, y + 1.0, g.cell_w - 4.0, g.cell_h - 2.0, 6.0),
-            };
+            let (bx, by, bw, bh) = g.card(x, y);
+            let radius = if self.mode() == ViewMode::Icons { 8.0 } else { 6.0 };
             let shape = gsk::RoundedRect::from_rect(rect(bx, by, bw, bh), radius);
             if selected {
                 snap.push_rounded_clip(&shape);
@@ -712,7 +735,7 @@ impl Canvas {
 
             let (ix, iy) = match self.mode() {
                 ViewMode::Icons => (x + (g.cell_w - g.icon) / 2.0, y + 10.0),
-                _ => (x + 12.0, y + (g.cell_h - g.icon) / 2.0),
+                _ => (x + LIST_ICON_X, y + (g.cell_h - g.icon) / 2.0),
             };
             let drawn_icon = if let Some(tex) = thumb {
                 // Fit the preview in the icon box, keeping its aspect ratio.
@@ -792,6 +815,25 @@ impl Canvas {
                 snap.append_layout(&l, &muted);
                 snap.restore();
             }
+            // Selection checkbox (hovered or selected items): toggles without Ctrl.
+            if imp.hover.get() == Some(idx) || selected {
+                let (cx, cy, d) = g.checkbox(x, y);
+                let disc = gsk::RoundedRect::from_rect(rect(cx, cy, d, d), (d / 2.0) as f32);
+                snap.push_rounded_clip(&disc);
+                snap.append_color(&if selected { accent } else { gdk::RGBA::new(0.08, 0.09, 0.11, 0.75) }, &rect(cx, cy, d, d));
+                snap.pop();
+                let ring = if selected { accent } else { alpha(&fg, 0.7) };
+                snap.append_border(&disc, &[1.5; 4], &[ring, ring, ring, ring]);
+                if selected {
+                    let l = self.create_pango_layout(None);
+                    l.set_markup(&format!("<span size='{}' weight='800'>✓</span>", (d * 0.55 * 0.75 * pango::SCALE as f64) as i32));
+                    let (cw, ch) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64);
+                    snap.save();
+                    snap.translate(&graphene::Point::new((cx + (d - cw) / 2.0) as f32, (cy + (d - ch) / 2.0) as f32));
+                    snap.append_layout(&l, &gdk::RGBA::WHITE);
+                    snap.restore();
+                }
+            }
             if self.mode() == ViewMode::Icons && selected && imp.cursor.get() == Some(idx) {
                 expand = Some((idx, x, y, drawn_icon.clone()));
             }
@@ -799,8 +841,8 @@ impl Canvas {
             let text = self.text_for(idx, &g, name_w);
             let th = text.name.pixel_size().1 as f64;
             let (tx, ty) = match self.mode() {
-                ViewMode::Icons => (x + 10.0, y + 10.0 + g.icon + 6.0),
-                ViewMode::Compact => (x + 12.0 + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
+                ViewMode::Icons => (bx + 6.0, y + 10.0 + g.icon + 6.0),
+                ViewMode::Compact => (x + LIST_ICON_X + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
                 ViewMode::Details => (name_x, y + (g.cell_h - th) / 2.0),
             };
             snap.save();
@@ -827,7 +869,7 @@ impl Canvas {
             };
             let full = self.create_pango_layout(None);
             full.set_markup(&e_name);
-            full.set_width(((g.cell_w - 20.0) * pango::SCALE as f64) as i32);
+            full.set_width(((g.card_w - 12.0) * pango::SCALE as f64) as i32);
             full.set_wrap(pango::WrapMode::WordChar);
             full.set_alignment(pango::Alignment::Center);
             no_hyphens(&full);
@@ -836,7 +878,8 @@ impl Canvas {
             if full_h > short_h {
                 // The whole cell grows downwards; the icon is drawn again on top of the fill.
                 let ty = y + 10.0 + g.icon + 6.0;
-                let r = rect(x + 4.0, y + 4.0, g.cell_w - 8.0, ty + full_h + 8.0 - (y + 4.0));
+                let (bx, by, bw, _) = g.card(x, y);
+                let r = rect(bx, by, bw, ty + full_h + 8.0 - by);
                 let shape = gsk::RoundedRect::from_rect(r, 8.0);
                 let bg = style.lookup_color("window_bg_color").unwrap_or(elev);
                 snap.push_rounded_clip(&shape);
@@ -851,7 +894,7 @@ impl Canvas {
                     snap.pop();
                 }
                 snap.save();
-                snap.translate(&graphene::Point::new((x + 10.0) as f32, ty as f32));
+                snap.translate(&graphene::Point::new((bx + 6.0) as f32, ty as f32));
                 snap.append_layout(&full, &fg);
                 snap.restore();
             }
@@ -1305,6 +1348,16 @@ impl Canvas {
         let hit = self.hit(x, y).map(|p| (p, self.model().order[p]));
         imp.pending_select.set(None);
         match (g.current_button(), hit) {
+            (1, Some((p, idx))) if n == 1 && self.on_checkbox(p, x, y) => {
+                {
+                    let mut m = imp.model.borrow_mut();
+                    m.selected[idx as usize] ^= true;
+                }
+                imp.cursor.set(Some(idx));
+                imp.anchor.set(Some(idx));
+                self.queue_draw();
+                self.emit(Action::Changed);
+            }
             (1, Some((_, idx))) if n == 2 => self.emit(Action::Activate(idx)),
             (1, Some((p, idx))) => {
                 if ctrl {
@@ -1349,6 +1402,15 @@ impl Canvas {
             }
             _ => {}
         }
+    }
+
+    fn on_checkbox(&self, p: usize, x: f64, y: f64) -> bool {
+        let g = self.geometry();
+        let (ox, oy) = g.origin(p);
+        let (sx, sy) = self.offset();
+        let (cx, cy, d) = g.checkbox(ox - sx, oy - sy);
+        // A little slack around the small target.
+        (cx - 3.0..=cx + d + 3.0).contains(&x) && (cy - 3.0..=cy + d + 3.0).contains(&y)
     }
 
     fn select_range(&self, a: usize, b: usize) {

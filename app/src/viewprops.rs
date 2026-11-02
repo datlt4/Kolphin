@@ -40,11 +40,21 @@ fn with_store<T>(f: impl FnOnce(&mut HashMap<PathBuf, ViewProps>) -> T) -> T {
     })
 }
 
+/// Settings follow the real folder: ~/Downloads → /mnt/data/Downloads share one entry (network shares as given).
+fn key(dir: &Path) -> PathBuf {
+    if crate::devices::is_remote(dir) {
+        return dir.to_path_buf();
+    }
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 pub fn load(dir: &Path) -> Option<ViewProps> {
-    with_store(|m| m.get(dir).cloned())
+    // Older entries were saved under the path as typed.
+    with_store(|m| m.get(&key(dir)).or_else(|| m.get(dir)).cloned())
 }
 
 pub fn save(dir: &Path, props: ViewProps) {
+    let dir = &key(dir);
     let json = with_store(|m| {
         if m.get(dir) == Some(&props) {
             return None;
@@ -176,4 +186,17 @@ pub fn add_recent_server(uri: &str) {
     let path = settings_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let _ = std::fs::write(path, s.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn symlinked_folder_shares_settings() {
+        let d = std::env::temp_dir().join(format!("kolphin-vp-{}", std::process::id()));
+        let real = d.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
+        assert_eq!(super::key(&d.join("link")), super::key(&real));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
