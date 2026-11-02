@@ -5,6 +5,7 @@ use crate::bookmarks;
 use crate::clipboard;
 use crate::kermius;
 use crate::palette;
+use crate::shelf;
 use crate::devices;
 use crate::dialogs;
 use crate::ops;
@@ -81,6 +82,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.show-sidebar", &["F9"]),
         ("win.terminal", &["F4"]),
         ("win.palette", &["<Control>k"]),
+        ("win.shelf", &["<Control><Shift>d"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -138,6 +140,7 @@ impl Win {
         menu.append(Some("Folder Statistics…"), Some("win.stats"));
         menu.append(Some("Connect to Server…"), Some("win.connect-server"));
         menu.append(Some("Command Palette (Ctrl+K)"), Some("win.palette"));
+        menu.append(Some("Drop Shelf (Ctrl+Shift+D)"), Some("win.shelf"));
         menu.append(Some("Edit Custom Actions…"), Some("win.edit-actions"));
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
@@ -586,6 +589,19 @@ impl Win {
             });
         });
         add("palette", |w| palette::show(w.window.upcast_ref()));
+        add("shelf", |w| {
+            if let Some(app) = w.window.application() {
+                let shelf = shelf::get(&app);
+                // Copy/Move from the shelf land in this window's active folder.
+                let weak = w.weak();
+                *shelf.on_transfer.borrow_mut() = Some(Box::new(move |items, cut| {
+                    if let Some(win) = weak.upgrade() {
+                        clipboard::run_transfer(&win.toasts, items, win.pane().path(), cut);
+                    }
+                }));
+                shelf.toggle();
+            }
+        });
         add("terminal", |w| {
             let k = kermius::get();
             // The shell's cd moves this window's active view (unless it is already there).

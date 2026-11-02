@@ -35,6 +35,7 @@ const COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("Group by Image Size", "", "win.group-by", Some("dimensions")),
     ("No Grouping", "", "win.group-by", Some("none")),
     ("Show Sidebar", "F9", "win.show-sidebar", None),
+    ("Drop Shelf", "Ctrl+Shift+D", "win.shelf", None),
     ("Edit Custom Actions", "", "win.edit-actions", None),
     ("Check for Updates", "", "win.check-update", None),
 ];

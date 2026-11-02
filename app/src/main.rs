@@ -13,6 +13,7 @@ mod palette;
 mod pane;
 mod pathbar;
 mod props;
+mod shelf;
 mod quicklook;
 mod stats;
 mod thumbs;
@@ -100,6 +101,8 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .palette row:selected { background: alpha(@accent_color, 0.18); }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
+.shelf { padding: 12px; background: @kolphin_side; border: 1px solid @kolphin_border; border-radius: 14px; }
+.shelf-list { background: @kolphin_elev; border-radius: 10px; padding: 6px; min-height: 120px; }
 .trash-bar { margin: 0 12px 6px; padding: 6px 6px 6px 12px; border-radius: 9px; background: @kolphin_elev; border: 1px solid @kolphin_border; }
 .pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }
 .pane-close:hover { background: @kolphin_hover_strong; color: #ffffff; }
@@ -136,6 +139,7 @@ fn main() -> glib::ExitCode {
             gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         }
         window::set_accels(app);
+        shelf::watch(app.upcast_ref());
     });
     app.connect_activate(|app| window::open(app, &[]));
     app.connect_open(|app, files, _| {

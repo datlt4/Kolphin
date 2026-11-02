@@ -70,8 +70,8 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - ✅ **Command palette (Ctrl+K)** giống Kermius.
 - ✅ Trash trong sidebar (cả Trash trên ổ NTFS): Restore, Empty Trash.
 
-### M7 — Drop Shelf
-- Lắc chuột khi đang kéo → hiện kệ thả tạm, thao tác rảnh tay rồi kéo ra sau. X11: theo dõi chuột toàn màn hình; Wayland: chỉ trong cửa sổ Kolphin + phím tắt.
+### M7 — Drop Shelf ✅ (v0.9.0)
+- ✅ Giữ chuột trái + lắc ngang (≥4 lần đổi hướng trong 0,7 s) → kệ hiện cạnh con trỏ, luôn nổi trên cùng (X11, theo dõi chuột toàn màn hình qua XQueryPointer). Kệ giữ đường dẫn, kéo ra một lần là xong; Copy here / Move here vào thư mục đang mở; Ctrl+Shift+D mở kệ thủ công (cả Wayland).
 
 ### M8 — Tích hợp hệ thống
 - Đặt làm file manager mặc định (`xdg-mime` + D-Bus `org.freedesktop.FileManager1` cho "Show in folder").
