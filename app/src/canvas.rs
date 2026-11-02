@@ -24,6 +24,8 @@ pub enum Action {
     SortBy(SortBy),
     /// Group collapsed/expanded or icon size changed (save the folder's view).
     ViewChanged,
+    /// Right click at (x, y); `on_item` when over an entry (it is selected first).
+    ContextMenu { x: f64, y: f64, on_item: bool },
     /// Selection or contents changed (refresh the status bar).
     Changed,
 }
@@ -251,6 +253,12 @@ mod imp {
             self.parent_constructed();
             self.obj().setup();
         }
+
+        fn dispose(&self) {
+            while let Some(c) = self.obj().first_child() {
+                c.unparent();
+            }
+        }
     }
 
     impl WidgetImpl for Canvas {
@@ -265,6 +273,14 @@ mod imp {
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             self.parent_size_allocate(width, height, baseline);
             self.obj().update_adjustment();
+            // Context menus are parented here; GTK needs the parent to place them.
+            let mut child = self.obj().first_child();
+            while let Some(c) = child {
+                if let Some(p) = c.downcast_ref::<gtk::Popover>() {
+                    p.present();
+                }
+                child = c.next_sibling();
+            }
         }
     }
 }
@@ -611,12 +627,18 @@ impl Canvas {
         let elev = style.lookup_color("kolphin_elev").unwrap_or(hover);
         let border = style.lookup_color("kolphin_border").unwrap_or(alpha(&fg, 0.12));
         let mut expand = None;
+        let custom = crate::viewprops::has_custom_icons().then(|| self.dir());
         for &p in &visible {
             let (idx, selected, icon, symlink, nlink) = {
                 let m = self.model();
                 let idx = m.order[p];
                 let e = &m.entries[idx as usize];
-                (idx, m.selected[idx as usize], icons::icon_name(&e.name.to_string_lossy(), e.is_dir), e.symlink, if e.is_dir { 1 } else { e.nlink })
+                let icon = custom
+                    .as_ref()
+                    .and_then(|d| crate::viewprops::custom_icon(&d.join(&*e.name)))
+                    .and_then(|c| icons::find(&c))
+                    .unwrap_or_else(|| icons::icon_name(&e.name.to_string_lossy(), e.is_dir));
+                (idx, m.selected[idx as usize], icon, e.symlink, if e.is_dir { 1 } else { e.nlink })
             };
             let thumb = match imp.thumbs.borrow().get(&idx) {
                 Some(Thumb::Ready(_, tex)) => Some(tex.clone()),
@@ -1134,7 +1156,18 @@ impl Canvas {
                 self.emit(Action::Changed);
             }
             (2, Some((_, idx))) if self.model().entries[idx as usize].is_dir => self.emit(Action::OpenInNewTab(idx)),
-            (3, Some((_, idx))) if !self.model().selected[idx as usize] => self.select_only(idx),
+            (3, hit) => {
+                match hit {
+                    Some((_, idx)) if !self.model().selected[idx as usize] => self.select_only(idx),
+                    Some(_) => {}
+                    None => {
+                        imp.model.borrow_mut().selected.iter_mut().for_each(|s| *s = false);
+                        self.queue_draw();
+                        self.emit(Action::Changed);
+                    }
+                }
+                self.emit(Action::ContextMenu { x, y, on_item: hit.is_some() });
+            }
             _ => {}
         }
     }

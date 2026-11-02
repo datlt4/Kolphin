@@ -1,6 +1,8 @@
 //! Main window: places sidebar, tabs, split view, header bar and window actions.
 use crate::canvas::ViewMode;
 use crate::clipboard;
+use crate::dialogs;
+use crate::stats;
 use crate::model::{GroupBy, SortBy};
 use crate::viewprops;
 use crate::pane::Pane;
@@ -33,8 +35,6 @@ pub struct Win {
     content: gtk::Paned,
     sidebar: gtk::Box,
     main_col: gtk::Box,
-    header: adw::HeaderBar,
-    side_header: adw::HeaderBar,
     view_button: gtk::MenuButton,
     places: gtk::ListBox,
     place_paths: RefCell<Vec<Option<PathBuf>>>,
@@ -94,12 +94,30 @@ fn mode_name(m: ViewMode) -> &'static str {
 impl Win {
     fn new(app: &adw::Application) -> Rc<Self> {
         let right = viewprops::sidebar_right();
-        let header = adw::HeaderBar::builder().show_start_title_buttons(right).show_end_title_buttons(!right).build();
-        for (icon, action, tip) in [("edit-cut-symbolic", "win.cut", "Cut (Ctrl+X)"), ("edit-copy-symbolic", "win.copy", "Copy (Ctrl+C)"), ("edit-paste-symbolic", "win.paste", "Paste (Ctrl+V)")] {
-            header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
+        // One full-width header: brand, back/forward | cut/copy/paste … view, split, menu.
+        let header = adw::HeaderBar::new();
+        let brand = gtk::Box::builder().spacing(10).css_classes(["brand"]).build();
+        let logo = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("../../assets/icons/kolphin-128.png"))).ok();
+        brand.append(&gtk::Image::builder().pixel_size(28).build());
+        if let (Some(img), Some(logo)) = (brand.first_child().and_downcast::<gtk::Image>(), logo) {
+            img.set_paintable(Some(&logo));
         }
+        brand.append(&gtk::Label::new(Some("Kolphin")));
+        let tools = gtk::Box::builder().spacing(2).build();
+        tools.append(&brand);
+        for (icon, action, tip) in [("go-previous-symbolic", "win.back", "Back (Alt+Left)"), ("go-next-symbolic", "win.forward", "Forward (Alt+Right)")] {
+            tools.append(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
+        }
+        tools.append(&gtk::Separator::builder().orientation(gtk::Orientation::Vertical).css_classes(["header-sep"]).build());
+        for (icon, action, tip) in [("edit-cut-symbolic", "win.cut", "Cut (Ctrl+X)"), ("edit-copy-symbolic", "win.copy", "Copy (Ctrl+C)"), ("edit-paste-symbolic", "win.paste", "Paste (Ctrl+V)")] {
+            tools.append(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
+        }
+        header.pack_start(&tools);
         let menu = gio::Menu::new();
         menu.append(Some("New Tab"), Some("win.new-tab"));
+        menu.append(Some("Select by Pattern…"), Some("win.select-pattern"));
+        menu.append(Some("Random Sample…"), Some("win.random-sample"));
+        menu.append(Some("Folder Statistics…"), Some("win.stats"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
@@ -114,28 +132,13 @@ impl Win {
         main.append(&tabs);
         tabs.set_vexpand(true);
 
-        let main_col = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        main_col.append(&header);
-        main_col.append(&main);
+        let main_col = main;
 
-        // Sidebar like Kermius: brand, places/devices, version at the bottom.
-        let brand = gtk::Box::builder().spacing(10).css_classes(["brand"]).build();
-        let logo = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("../../assets/icons/kolphin-128.png"))).ok();
-        brand.append(&gtk::Image::builder().pixel_size(28).build());
-        if let (Some(img), Some(logo)) = (brand.first_child().and_downcast::<gtk::Image>(), logo) {
-            img.set_paintable(Some(&logo));
-        }
-        brand.append(&gtk::Label::new(Some("Kolphin")));
-        let side_header = adw::HeaderBar::builder().show_end_title_buttons(right).show_start_title_buttons(!right).title_widget(&gtk::Box::new(gtk::Orientation::Horizontal, 0)).build();
-        side_header.pack_start(&brand);
-        for (icon, action, tip) in [("go-previous-symbolic", "win.back", "Back (Alt+Left)"), ("go-next-symbolic", "win.forward", "Forward (Alt+Right)")] {
-            side_header.pack_start(&gtk::Button::builder().icon_name(icon).action_name(action).tooltip_text(tip).build());
-        }
+        // Sidebar like Kermius: places/devices, version at the bottom.
         let places = gtk::ListBox::builder().css_classes(["places"]).build();
         let side_scroll = gtk::ScrolledWindow::builder().child(&places).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
         let version = gtk::Label::builder().label(format!("v{}", env!("CARGO_PKG_VERSION"))).xalign(0.0).css_classes(["side-foot"]).build();
         let sidebar = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["sidebar-pane"]).width_request(200).build();
-        sidebar.append(&side_header);
         sidebar.append(&side_scroll);
         sidebar.append(&version);
 
@@ -143,8 +146,11 @@ impl Win {
         content.add_css_class("root-split");
         content.set_wide_handle(false);
         content.set_vexpand(true);
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        frame.append(&header);
+        frame.append(&content);
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&content));
+        toasts.set_child(Some(&frame));
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Kolphin")
@@ -158,8 +164,6 @@ impl Win {
             content,
             sidebar,
             main_col,
-            header,
-            side_header,
             view_button,
             window,
             tabs,
@@ -343,7 +347,7 @@ impl Win {
         }
     }
 
-    /// Put the sidebar on the left or right; window buttons follow the outer edge.
+    /// Put the sidebar on the left or right.
     fn place_sidebar(&self, right: bool) {
         let c = &self.content;
         c.set_start_child(None::<&gtk::Widget>);
@@ -353,10 +357,6 @@ impl Win {
         c.set_end_child(Some(end));
         c.set_resize_start_child(right);
         c.set_resize_end_child(!right);
-        self.header.set_show_start_title_buttons(right);
-        self.header.set_show_end_title_buttons(!right);
-        self.side_header.set_show_start_title_buttons(!right);
-        self.side_header.set_show_end_title_buttons(right);
         let width = self.window.default_width().max(self.window.width());
         c.set_position(if right { width - 240 } else { 240 });
     }
@@ -395,6 +395,65 @@ impl Win {
         add("copy", |w| clipboard::copy(&w.pane(), false, &w.toasts));
         add("cut", |w| clipboard::copy(&w.pane(), true, &w.toasts));
         add("paste", |w| clipboard::paste(&w.pane(), &w.toasts));
+        add("open-selected", |w| w.pane().open_selected(false));
+        add("open-tab-selected", |w| w.pane().open_selected(true));
+        add("select-all", |w| {
+            w.pane().canvas.update(|m| {
+                for k in 0..m.order.len() {
+                    let i = m.order[k] as usize;
+                    m.selected[i] = true;
+                }
+            })
+        });
+        add("copy-path", |w| {
+            let paths = w.pane().selected_paths();
+            let text = paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join("\n");
+            w.window.clipboard().set_text(&text);
+            w.toasts.add_toast(adw::Toast::new(&format!("Copied {} path(s)", paths.len())));
+        });
+        add("stats", |w| {
+            let pane = w.pane();
+            stats::show(w.window.upcast_ref(), &pane.path(), &pane.canvas.model());
+        });
+        add("select-pattern", |w| {
+            let weak = w.weak();
+            dialogs::prompt(w.window.upcast_ref(), "Select by Pattern", "Wildcards like *.jpg or img_??.png, or a regex between slashes: /^img_\\d+\\.png$/", "*", move |text| {
+                let Some(w) = weak.upgrade() else { return };
+                let msg = match w.pane().select_pattern(&text) {
+                    Ok(n) => format!("Selected {n} item(s)"),
+                    Err(e) => format!("Bad pattern: {e}"),
+                };
+                w.toasts.add_toast(adw::Toast::new(&msg));
+            });
+        });
+        add("random-sample", |w| {
+            let weak = w.weak();
+            dialogs::prompt(w.window.upcast_ref(), "Random Sample", "How many files to pick at random from this folder (after filters)?", "100", move |text| {
+                let Some(w) = weak.upgrade() else { return };
+                let msg = match text.trim().parse::<usize>() {
+                    Ok(n) => format!("Selected {} random file(s)", w.pane().random_sample(n)),
+                    Err(_) => "Enter a number".to_string(),
+                };
+                w.toasts.add_toast(adw::Toast::new(&msg));
+            });
+        });
+        add("change-icon", |w| {
+            let paths = w.pane().selected_paths();
+            if paths.is_empty() {
+                return;
+            }
+            let weak = w.weak();
+            dialogs::pick_icon(w.window.upcast_ref(), move |icon| {
+                viewprops::set_custom_icon(&paths, Some(icon));
+                if let Some(w) = weak.upgrade() {
+                    w.pane().canvas.queue_draw();
+                }
+            });
+        });
+        add("reset-icon", |w| {
+            viewprops::set_custom_icon(&w.pane().selected_paths(), None);
+            w.pane().canvas.queue_draw();
+        });
 
         let stateful = |name: &str, init: glib::Variant, f: fn(&Rc<Win>, &glib::Variant)| {
             let param = (init.type_() == glib::VariantTy::STRING).then_some(glib::VariantTy::STRING);
@@ -434,6 +493,7 @@ impl Win {
                 Some("extension") => GroupBy::Extension,
                 Some("size") => GroupBy::Size,
                 Some("modified") => GroupBy::Modified,
+                Some("dimensions") => GroupBy::Dimensions,
                 _ => GroupBy::None,
             });
         });
@@ -576,7 +636,7 @@ fn view_menu() -> gio::Menu {
     sort.append(Some("Descending"), Some("win.sort-desc"));
     section(
         "Group by",
-        &[("None", "none"), ("Name", "name"), ("Type", "type"), ("Extension", "extension"), ("Size", "size"), ("Modified", "modified")],
+        &[("None", "none"), ("Name", "name"), ("Type", "type"), ("Extension", "extension"), ("Size", "size"), ("Modified", "modified"), ("Image Size (W×H)", "dimensions")],
         "win.group-by",
     );
     let more = gio::Menu::new();

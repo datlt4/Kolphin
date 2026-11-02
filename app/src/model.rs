@@ -20,12 +20,14 @@ pub struct Entry {
     pub symlink: bool,
     /// Hard links to this file (1 = none besides itself).
     pub nlink: u32,
+    /// Image size: None = not read yet, Some(None) = not an image or unreadable.
+    pub dims: Option<Option<(u32, u32)>>,
 }
 
 impl Entry {
     pub fn new(name: OsString, is_dir: bool) -> Self {
         let key = sort_key(&name.to_string_lossy(), is_dir);
-        Entry { name: name.into_boxed_os_str(), key, is_dir, deleted: false, size: UNKNOWN_SIZE, mtime: UNKNOWN_TIME, symlink: false, nlink: 1 }
+        Entry { name: name.into_boxed_os_str(), key, is_dir, deleted: false, size: UNKNOWN_SIZE, mtime: UNKNOWN_TIME, symlink: false, nlink: 1, dims: None }
     }
 
     pub fn hidden(&self) -> bool {
@@ -167,6 +169,8 @@ pub enum GroupBy {
     Extension,
     Size,
     Modified,
+    /// Image width × height (read from file headers in the background).
+    Dimensions,
 }
 
 /// A run of `order` shown under one group header; collapsed groups keep their count but no items.
@@ -355,6 +359,12 @@ impl Model {
                 (title.into(), (rank, String::new()))
             }
             GroupBy::Modified => now.bucket(e.mtime),
+            GroupBy::Dimensions => match e.dims {
+                _ if e.is_dir => ("Folders".into(), (0, String::new())),
+                Some(Some((w, h))) => (format!("{w} × {h}"), (1_000_000_000_000 - w as i64 * h as i64, String::new())),
+                None if crate::thumbs::kind(&e.name.to_string_lossy()) == Some(crate::thumbs::Kind::Image) => ("Reading…".into(), (2_000_000_000_000, String::new())),
+                _ => ("Not images".into(), (3_000_000_000_000, String::new())),
+            },
         }
     }
 }
@@ -408,6 +418,11 @@ pub fn extension(e: &Entry) -> String {
 fn type_label(ext: &str) -> String {
     let (ct, _) = gtk::gio::content_type_guess(Some(&format!("x.{ext}")), None::<&[u8]>);
     gtk::gio::content_type_get_description(&ct).to_string()
+}
+
+/// Whole-name, case-insensitive wildcard match (`*`, `?`).
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    wildcard(pattern.to_lowercase().as_bytes(), name.to_lowercase().as_bytes())
 }
 
 /// Name filter: case-insensitive substring, or a whole-name wildcard pattern when it has `*` or `?`.
@@ -509,6 +524,18 @@ mod tests {
         m.rebuild_order();
         assert_eq!(shown(&m), ["dir", "a.txt"]);
         assert_eq!(m.sections[1].len, 0);
+    }
+
+    #[test]
+    fn group_by_dimensions() {
+        let mut m = model(&[("a.jpg", false, 1), ("b.jpg", false, 1), ("c.png", false, 1), ("d.txt", false, 1)]);
+        m.entries[0].dims = Some(Some((640, 480)));
+        m.entries[1].dims = Some(Some((1920, 1080)));
+        m.group = GroupBy::Dimensions;
+        m.rebuild_order();
+        let titles: Vec<_> = m.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["1920 × 1080", "640 × 480", "Reading…", "Not images"]);
+        assert!(glob_match("*.JPG", "a.jpg") && !glob_match("a?", "abc"));
     }
 
     #[test]

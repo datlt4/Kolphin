@@ -1,9 +1,11 @@
 mod canvas;
 mod clipboard;
+mod dialogs;
 mod icons;
 mod model;
 mod pane;
 mod pathbar;
+mod stats;
 mod thumbs;
 mod update;
 mod viewprops;
@@ -47,7 +49,10 @@ headerbar button:hover { background: @kolphin_hover; }
 headerbar button:checked { background: alpha(@accent_color, 0.16); color: #cfdcff; }
 
 .sidebar-pane { background: @kolphin_side; }
-.sidebar-pane headerbar { background: @kolphin_side; }
+headerbar { background: @kolphin_side; }
+.brand { margin: 0 10px 0 4px; }
+.header-sep { margin: 10px 8px; min-width: 1px; background: @kolphin_border; }
+.places { padding-top: 6px; }
 .brand label { font-weight: 700; font-size: 16px; }
 .places { background: transparent; padding: 0 10px 12px; }
 .places row { border-radius: 9px; padding: 7px 11px; margin: 1px 0; color: @kolphin_muted; }
@@ -70,6 +75,10 @@ tabbar tab:selected { background: #262b38; color: #ffffff; box-shadow: inset 0 0
 .pathbar button:hover { background: @kolphin_hover; color: @window_fg_color; }
 .pathbar button.current { color: @window_fg_color; }
 .pathbar label.dim-label { color: @kolphin_faint; opacity: 1; }
+.dialog-body { padding: 18px; }
+.side-title-label { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: @kolphin_faint; margin-top: 6px; }
+progressbar trough { min-height: 6px; border-radius: 99px; background: @kolphin_elev; }
+progressbar progress { min-height: 6px; border-radius: 99px; background: @accent_color; }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
 scrollbar { background: transparent; border: none; }

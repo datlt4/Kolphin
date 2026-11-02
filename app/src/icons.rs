@@ -57,6 +57,16 @@ pub fn icon_name(name: &str, is_dir: bool) -> &'static str {
     &m.file
 }
 
+/// The embedded icon called `name`, as a static string.
+pub fn find(name: &str) -> Option<&'static str> {
+    SVGS.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|i| SVGS[i].0)
+}
+
+/// Every embedded icon name, sorted.
+pub fn all() -> impl Iterator<Item = &'static str> {
+    SVGS.iter().map(|(n, _)| *n)
+}
+
 thread_local! {
     static TEXTURES: RefCell<HashMap<(&'static str, u32), gdk::Texture>> = RefCell::new(HashMap::new());
 }

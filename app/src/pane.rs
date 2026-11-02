@@ -190,12 +190,131 @@ impl Pane {
         self.save_props();
     }
 
-    pub fn group_by(&self, group: model::GroupBy) {
+    pub fn group_by(self: &Rc<Self>, group: model::GroupBy) {
         self.canvas.update(|m| {
             m.group = group;
             m.rebuild_order();
         });
         self.save_props();
+        self.read_dims();
+    }
+
+    /// Read image sizes from file headers in the background (only while grouping by dimensions).
+    fn read_dims(self: &Rc<Self>) {
+        if self.canvas.model().group != model::GroupBy::Dimensions {
+            return;
+        }
+        let todo: Vec<(u32, PathBuf)> = {
+            let m = self.canvas.model();
+            let dir = self.path();
+            m.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.is_dir && !e.deleted && e.dims.is_none())
+                .filter(|(_, e)| crate::thumbs::kind(&e.name.to_string_lossy()) == Some(crate::thumbs::Kind::Image))
+                .map(|(i, e)| (i as u32, dir.join(&*e.name)))
+                .collect()
+        };
+        if todo.is_empty() {
+            return;
+        }
+        let (tx, rx) = async_channel::unbounded::<Vec<(u32, Option<(u32, u32)>)>>();
+        std::thread::spawn(move || {
+            let (mut batch, mut last) = (Vec::new(), Instant::now());
+            for (i, path) in todo {
+                batch.push((i, imagesize::size(&path).ok().map(|s| (s.width as u32, s.height as u32))));
+                if last.elapsed() > Duration::from_millis(300) {
+                    last = Instant::now();
+                    if tx.send_blocking(std::mem::take(&mut batch)).is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send_blocking(batch);
+        });
+        let (weak, generation) = (Rc::downgrade(self), self.generation.get());
+        glib::spawn_future_local(async move {
+            while let Ok(batch) = rx.recv().await {
+                let Some(pane) = weak.upgrade() else { return };
+                if pane.generation.get() != generation {
+                    return;
+                }
+                pane.canvas.update(|m| {
+                    for (i, d) in batch {
+                        m.entries[i as usize].dims = Some(d);
+                    }
+                    m.rebuild_order();
+                });
+            }
+        });
+    }
+
+    /// Select names matching a wildcard pattern, or a regex written as /…/; returns how many.
+    pub fn select_pattern(&self, pattern: &str) -> Result<usize, String> {
+        let pattern = pattern.trim();
+        let re = match pattern.strip_prefix('/').and_then(|p| p.strip_suffix('/')) {
+            Some(r) => Some(regex::RegexBuilder::new(r).case_insensitive(true).build().map_err(|e| e.to_string())?),
+            None => None,
+        };
+        let mut n = 0;
+        self.canvas.update(|m| {
+            m.selected.iter_mut().for_each(|s| *s = false);
+            for k in 0..m.order.len() {
+                let i = m.order[k] as usize;
+                let name = m.entries[i].name.to_string_lossy();
+                let hit = match &re {
+                    Some(re) => re.is_match(&name),
+                    None => model::glob_match(pattern, &name),
+                };
+                if hit {
+                    m.selected[i] = true;
+                    n += 1;
+                }
+            }
+        });
+        Ok(n)
+    }
+
+    /// Select `n` random visible files (folders are skipped); returns how many.
+    pub fn random_sample(&self, n: usize) -> usize {
+        let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut picked = 0;
+        self.canvas.update(|m| {
+            let mut files: Vec<u32> = m.order.iter().copied().filter(|&i| !m.entries[i as usize].is_dir).collect();
+            let k = n.min(files.len());
+            for j in 0..k {
+                let r = j + (rand() as usize) % (files.len() - j);
+                files.swap(j, r);
+            }
+            m.selected.iter_mut().for_each(|s| *s = false);
+            for &i in &files[..k] {
+                m.selected[i as usize] = true;
+            }
+            picked = k;
+        });
+        picked
+    }
+
+    /// Enter on the selection: one item opens like a double click; several open folders in tabs and files in their apps.
+    pub fn open_selected(self: &Rc<Self>, in_tabs: bool) {
+        let sel = self.canvas.selection();
+        if sel.len() == 1 && !in_tabs {
+            return self.on_canvas(Action::Activate(sel[0]));
+        }
+        for idx in sel {
+            let is_dir = self.canvas.model().entries[idx as usize].is_dir;
+            if is_dir {
+                self.on_canvas(Action::OpenInNewTab(idx));
+            } else if !in_tabs {
+                self.on_canvas(Action::Activate(idx));
+            }
+        }
     }
 
     pub fn toggle_filter(&self) {
@@ -366,6 +485,7 @@ impl Pane {
                         }
                         pane.loading.set(false);
                         pane.canvas.update(|m| m.entries.shrink_to_fit());
+                        pane.after_load();
                         pane.watch();
                         pane.update_status();
                         if bench {
@@ -423,7 +543,37 @@ impl Pane {
                 self.sync_slider();
                 self.save_props();
             }
+            Action::ContextMenu { x, y, on_item } => self.context_menu(x, y, on_item),
         }
+    }
+
+    fn context_menu(&self, x: f64, y: f64, on_item: bool) {
+        let menu = gio::Menu::new();
+        let section = |items: &[(&str, &str)]| {
+            let s = gio::Menu::new();
+            for (label, action) in items {
+                s.append(Some(label), Some(action));
+            }
+            menu.append_section(None, &s);
+        };
+        if on_item {
+            section(&[("Open", "win.open-selected"), ("Open in New Tab", "win.open-tab-selected")]);
+            section(&[("Cut", "win.cut"), ("Copy", "win.copy"), ("Paste", "win.paste"), ("Copy Path", "win.copy-path")]);
+            section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
+        } else {
+            section(&[("Paste", "win.paste"), ("Select All", "win.select-all")]);
+            section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
+        }
+        section(&[("Folder Statistics…", "win.stats")]);
+        let pop = gtk::PopoverMenu::from_model(Some(&menu));
+        pop.set_parent(&self.canvas);
+        pop.set_has_arrow(false);
+        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        pop.popup();
     }
 
     fn update_status(&self) {
@@ -489,7 +639,7 @@ impl Pane {
         *self.monitor.borrow_mut() = Some(monitor);
     }
 
-    fn apply_changes(&self) {
+    fn apply_changes(self: &Rc<Self>) {
         let Changes { created, mut deleted, .. } = std::mem::take(&mut *self.changes.borrow_mut());
         let dir = self.path();
         // Re-add created/changed names that still exist, with fresh stats.
@@ -510,6 +660,11 @@ impl Pane {
             m.remove_names(&deleted);
             m.append(added);
         });
+        self.read_dims();
+    }
+
+    fn after_load(self: &Rc<Self>) {
+        self.read_dims();
     }
 }
 
