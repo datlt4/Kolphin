@@ -51,6 +51,28 @@ pub enum Connected {
     Shares(Vec<(String, String)>),
 }
 
+/// Hosts gvfs found on the LAN (DNS-SD/SMB), as (name, smb:// URI); the empty "Windows Network" root is left out.
+pub fn discover(done: impl FnOnce(Vec<(String, String)>) + 'static) {
+    let net = gio::File::for_uri("network:///");
+    glib::spawn_future_local(async move {
+        let mut hosts = Vec::new();
+        if let Ok(en) = net.enumerate_children_future("standard::display-name,standard::target-uri", gio::FileQueryInfoFlags::NONE, glib::Priority::LOW).await {
+            while let Ok(infos) = en.next_files_future(32, glib::Priority::LOW).await {
+                if infos.is_empty() {
+                    break;
+                }
+                for i in infos {
+                    if let Some(uri) = i.attribute_string("standard::target-uri").filter(|u| u.as_str() != "smb:///") {
+                        hosts.push((i.display_name().to_string(), uri.to_string()));
+                    }
+                }
+            }
+        }
+        hosts.sort();
+        done(hosts);
+    });
+}
+
 /// "HDD-1TB on 192.168.0.186" for smb://192.168.0.186/HDD-1TB; other URIs as they are.
 pub fn server_label(uri: &str) -> String {
     match uri.split_once("://").map(|(_, r)| r.trim_end_matches('/')) {

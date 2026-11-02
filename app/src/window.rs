@@ -48,6 +48,8 @@ pub struct Win {
     view_button: gtk::MenuButton,
     places: gtk::ListBox,
     place_paths: RefCell<Vec<Option<Place>>>,
+    /// LAN hosts found by gvfs (name, URI).
+    hosts: RefCell<Vec<(String, String)>>,
 }
 
 thread_local! {
@@ -193,6 +195,7 @@ impl Win {
             last_cd: Default::default(),
             places,
             place_paths: Default::default(),
+            hosts: Default::default(),
         });
         win.setup_actions();
         win.setup_places();
@@ -795,6 +798,8 @@ impl Win {
             let place = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
             match place {
                 Some(Place::Path(path) | Place::Bookmark(path)) => win.pane().navigate(path),
+                Some(Place::Share(path, _)) if path.is_dir() => win.pane().navigate(path),
+                Some(Place::Share(_, uri)) => win.connect_server(uri),
                 Some(Place::Volume(vol)) => {
                     let weak = win.weak();
                     devices::mount_volume(win.window.upcast_ref(), vol, move |res| win_open(&weak, res, None));
@@ -868,6 +873,28 @@ impl Win {
         monitor.connect_volume_added(glib::clone!(#[strong] refresh, move |_, _| refresh()));
         monitor.connect_volume_removed(move |_, _| refresh());
         self.fill_places();
+        // Look for LAN hosts now and every minute.
+        let w = self.weak();
+        let scan = move || {
+            let w = w.clone();
+            devices::discover(move |hosts| {
+                if let Some(win) = w.upgrade() {
+                    if *win.hosts.borrow() != hosts {
+                        *win.hosts.borrow_mut() = hosts;
+                        win.fill_places();
+                    }
+                }
+            });
+        };
+        scan();
+        let w = self.weak();
+        glib::timeout_add_seconds_local(60, move || {
+            if w.upgrade().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            scan();
+            glib::ControlFlow::Continue
+        });
     }
 
     fn connect_server(self: &Rc<Self>, uri: String) {
@@ -1016,15 +1043,19 @@ impl Win {
         let mut shown = Vec::new();
         for m in network {
             let uri = m.root().uri().to_string();
-            if let Some(path) = m.root().path() {
-                shown.push(uri);
-                add(m.symbolic_icon(), &m.name(), Place::Path(path), None, Some(m.clone()));
+            // A share whose folder is gone was unmounted behind gvfs' back: offer the saved server instead.
+            if let Some(path) = m.root().path().filter(|p| p.is_dir()) {
+                shown.push(uri.clone());
+                add(m.symbolic_icon(), &m.name(), Place::Share(path, uri), None, Some(m.clone()));
             }
         }
         // gvfs lower-cases share names in its URIs, so compare without case.
         let shown: Vec<String> = shown.iter().map(|s| s.to_lowercase()).collect();
         for uri in viewprops::recent_servers().into_iter().filter(|u| !shown.iter().any(|s| s.starts_with(&u.trim_end_matches('/').to_lowercase()))) {
             add(themed("network-server-symbolic"), &devices::server_label(&uri), Place::Server(uri.clone()), None, None);
+        }
+        for (name, uri) in self.hosts.borrow().iter() {
+            add(themed("network-workgroup-symbolic"), name, Place::Server(uri.clone()), None, None);
         }
         add(themed("list-add-symbolic"), "Connect to Server…", Place::Connect, None, None);
         *self.place_paths.borrow_mut() = places.into_inner();
@@ -1055,6 +1086,8 @@ fn special_dir(dir: glib::UserDirectory) -> Option<PathBuf> {
 enum Place {
     Path(PathBuf),
     Bookmark(PathBuf),
+    /// A network mount: its local path, and the URI to reconnect if it went away.
+    Share(PathBuf, String),
     Volume(gio::Volume),
     Server(String),
     Connect,
