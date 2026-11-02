@@ -27,12 +27,22 @@ pub fn show(parent: &gtk::Window, path: PathBuf) {
         body.append(&r);
         v
     };
+    // A row whose value has a copy button.
+    let copy_row = |label: &str, value: &str| {
+        let v = row(label, value);
+        let copy = gtk::Button::builder().icon_name("edit-copy-symbolic").css_classes(["flat"]).valign(gtk::Align::Center).tooltip_text(format!("Copy {}", label.to_lowercase())).build();
+        copy.connect_clicked(glib::clone!(#[weak] v, move |b| b.clipboard().set_text(&v.text())));
+        if let Some(r) = v.parent().and_downcast::<gtk::Box>() {
+            r.append(&copy);
+        }
+    };
     let date = |t: i64| glib::DateTime::from_unix_local(t).ok().and_then(|d| d.format("%Y-%m-%d %H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
     let is_dir = meta.is_dir();
     let (ct, _) = gtk::gio::content_type_guess(Some(&path), None::<&[u8]>);
     body.append(&gtk::Label::builder().label("GENERAL").xalign(0.0).css_classes(["side-title-label"]).build());
-    row("Name", &name);
-    row("Location", &path.parent().map(|p| p.display().to_string()).unwrap_or_default());
+    copy_row("Name", &name);
+    copy_row("Location", &path.parent().map(|p| p.display().to_string()).unwrap_or_default());
+    copy_row("Path", &path.display().to_string());
     row("Type", &if is_dir { "Folder".into() } else { gtk::gio::content_type_get_description(&ct).to_string() });
     if meta.file_type().is_symlink() {
         row("Link to", &std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_default());
