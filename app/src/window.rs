@@ -144,9 +144,10 @@ impl Win {
         header.pack_end(&view_button);
 
         let tabs = adw::TabView::new();
-        let tab_bar = adw::TabBar::builder().view(&tabs).autohide(true).build();
+        // Tabs live in the header, in place of the window title (like Kermius).
+        let tab_bar = adw::TabBar::builder().view(&tabs).autohide(false).hexpand(true).build();
+        header.set_title_widget(Some(&tab_bar));
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        main.append(&tab_bar);
         main.append(&tabs);
         tabs.set_vexpand(true);
 

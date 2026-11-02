@@ -79,10 +79,11 @@ headerbar { background: @kolphin_side; }
 paned > separator { min-width: 1px; min-height: 1px; margin: 0; padding: 0; background: @kolphin_border; background-image: none; box-shadow: none; }
 headerbar .linked > button:not(:checked):not(:hover) { background: none; box-shadow: none; }
 
-tabbar .box { background: @kolphin_side; border-bottom: 1px solid @kolphin_border; box-shadow: none; }
-tabbar tab { border-radius: 8px; margin: 6px 2px; color: @kolphin_muted; }
-tabbar tab:hover { background: @kolphin_hover_strong; color: #ffffff; }
-tabbar tab:selected { background: #262b38; color: #ffffff; box-shadow: inset 0 0 0 1px #363c4b; }
+tabbar .box { background: none; border: none; box-shadow: none; padding: 0; }
+tabbar tab { border-radius: 8px; margin: 4px 2px; min-height: 30px; color: @kolphin_muted; }
+tabbar tab:hover:not(:selected):not(:checked) { background: @kolphin_hover_strong; color: #ffffff; }
+tabbar tab, tabbar tab:backdrop { background: none; box-shadow: none; }
+tabbar tab:selected, tabbar tab:checked { background: #262b38; color: #ffffff; box-shadow: inset 0 0 0 1px #363c4b; }
 
 .pathbar { background: @kolphin_elev; border: 1px solid @kolphin_border; border-radius: 9px; margin: 10px 12px 6px; min-height: 34px; }
 .pathbar entry { background: none; border: none; box-shadow: none; outline: none; min-height: 32px; }
