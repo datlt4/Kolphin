@@ -26,6 +26,8 @@ pub enum Action {
     ViewChanged,
     /// Right click at (x, y); `on_item` when over an entry (it is selected first).
     ContextMenu { x: f64, y: f64, on_item: bool },
+    /// Files dropped on the view: copy or move them into `dir`.
+    Drop { files: Vec<std::path::PathBuf>, dir: std::path::PathBuf, cut: bool },
     /// Selection or contents changed (refresh the status bar).
     Changed,
 }
@@ -38,6 +40,20 @@ const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
 
+/// Move (true) or copy: Shift forces move, Ctrl forces copy, otherwise move within one filesystem (like Nautilus).
+fn drop_action(t: &gtk::DropTarget, files: &[gio::File], dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let state = t.current_event_state();
+    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+        return true;
+    }
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        return false;
+    }
+    let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+    files.first().and_then(|f| f.path()).is_some_and(|p| dev(&p).is_some() && dev(&p) == dev(dir))
+}
+
 /// Wrap long names without inserting "-" at the break.
 fn no_hyphens(layout: &pango::Layout) {
     let attrs = layout.attributes().unwrap_or_default();
@@ -45,14 +61,9 @@ fn no_hyphens(layout: &pango::Layout) {
     layout.set_attributes(Some(&attrs));
 }
 
-/// Pango markup for a name; symlinks get a dim ↪ after it.
-fn name_markup(name: &str, symlink: bool) -> String {
-    let name = glib::markup_escape_text(name);
-    if symlink {
-        format!("{name} <span foreground='#8b91a1'>↪</span>")
-    } else {
-        name.to_string()
-    }
+/// Pango markup for a name (symlinks are marked on the icon instead).
+fn name_markup(name: &str, _symlink: bool) -> String {
+    glib::markup_escape_text(name).to_string()
 }
 
 /// One group laid out along the scroll axis.
@@ -519,6 +530,20 @@ impl Canvas {
         g.hit(x + sx, y + sy)
     }
 
+    pub fn cursor_position(&self) -> Option<usize> {
+        self.cursor_pos().or_else(|| {
+            let m = self.model();
+            m.order.iter().position(|&i| m.selected[i as usize])
+        })
+    }
+
+    pub fn select_position(&self, p: usize) {
+        let idx = self.model().order.get(p).copied();
+        if let Some(idx) = idx {
+            self.select_only(idx);
+        }
+    }
+
     fn cursor_pos(&self) -> Option<usize> {
         let idx = self.imp().cursor.get()?;
         self.model().order.iter().position(|&i| i == idx)
@@ -688,8 +713,27 @@ impl Canvas {
             } else {
                 None
             };
-            // Link badges: ↪ symlink (bottom-left), ×N hard links (bottom-right), dark chips like the UI.
-            for (text, right) in [(symlink.then(|| "↪".to_string()), false), ((nlink > 1).then(|| format!("×{nlink}")), true)] {
+            // Symlink: Ubuntu-style emblem, a purple disc with a white ↗ on the icon's bottom-right corner.
+            if symlink {
+                let d = (g.icon * 0.42).clamp(12.0, 44.0);
+                let (cx, cy) = (ix + g.icon - d * 0.75, iy + g.icon - d * 0.75);
+                let ring = gsk::RoundedRect::from_rect(rect(cx - 1.5, cy - 1.5, d + 3.0, d + 3.0), (d / 2.0 + 1.5) as f32);
+                snap.push_rounded_clip(&ring);
+                snap.append_color(&gdk::RGBA::new(0.08, 0.09, 0.11, 1.0), &rect(cx - 1.5, cy - 1.5, d + 3.0, d + 3.0));
+                snap.pop();
+                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(rect(cx, cy, d, d), (d / 2.0) as f32));
+                snap.append_color(&gdk::RGBA::new(0.55, 0.25, 0.55, 1.0), &rect(cx, cy, d, d));
+                snap.pop();
+                let l = self.create_pango_layout(None);
+                l.set_markup(&format!("<span size='{}' weight='800'>↗</span>", (d * 0.62 * 0.75 * pango::SCALE as f64) as i32));
+                let (aw, ah) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64);
+                snap.save();
+                snap.translate(&graphene::Point::new((cx + (d - aw) / 2.0) as f32, (cy + (d - ah) / 2.0) as f32));
+                snap.append_layout(&l, &gdk::RGBA::WHITE);
+                snap.restore();
+            }
+            // Hard links: a dark ×N chip on the bottom-left.
+            for (text, right) in [((nlink > 1).then(|| format!("×{nlink}")), false)] {
                 let Some(text) = text else { continue };
                 let l = self.create_pango_layout(None);
                 l.set_markup(&format!("<span size='{}' weight='600'>{text}</span>", if g.icon >= 48.0 { "small" } else { "x-small" }));
@@ -989,6 +1033,8 @@ impl Canvas {
         }));
         self.add_controller(drag);
 
+        self.setup_dnd();
+
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion(glib::clone!(#[weak(rename_to = c)] self, move |_, x, y| {
             let idx = c.hit(x, y).map(|p| c.model().order[p]);
@@ -1017,6 +1063,92 @@ impl Canvas {
         focus.connect_enter(glib::clone!(#[weak(rename_to = c)] self, move |_| c.queue_draw()));
         focus.connect_leave(glib::clone!(#[weak(rename_to = c)] self, move |_| c.queue_draw()));
         self.add_controller(focus);
+    }
+
+    /// Drag selected files out (as a URI list) and accept files dropped in, onto a folder or the view.
+    fn setup_dnd(&self) {
+        let src = gtk::DragSource::new();
+        src.set_actions(gdk::DragAction::COPY | gdk::DragAction::MOVE);
+        src.connect_prepare(glib::clone!(
+            #[weak(rename_to = c)]
+            self,
+            #[upgrade_or]
+            None,
+            move |s, x, y| {
+                let p = c.hit(x, y)?;
+                let idx = c.model().order[p];
+                if !c.model().selected[idx as usize] {
+                    c.select_only(idx);
+                }
+                c.imp().pending_select.set(None);
+                let dir = c.dir();
+                let (uris, icon) = {
+                    let m = c.model();
+                    let uris: Vec<String> = c.selection().iter().map(|&i| gio::File::for_path(dir.join(&*m.entries[i as usize].name)).uri().to_string()).collect();
+                    let e = &m.entries[idx as usize];
+                    (uris, icons::icon_name(&e.name.to_string_lossy(), e.is_dir))
+                };
+                if let Some(tex) = icons::texture(icon, 64) {
+                    s.set_icon(Some(&tex), 32, 32);
+                }
+                Some(gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from_owned((uris.join("\r\n") + "\r\n").into_bytes())))
+            }
+        ));
+        self.add_controller(src);
+
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
+        drop.set_preload(true);
+        drop.connect_motion(glib::clone!(
+            #[weak(rename_to = c)]
+            self,
+            #[upgrade_or]
+            gdk::DragAction::empty(),
+            move |t, x, y| {
+                let (dir, folder) = c.drop_dir(x, y);
+                if c.imp().hover.replace(folder) != folder {
+                    c.queue_draw();
+                }
+                let files = t.value().and_then(|v| v.get::<gdk::FileList>().ok()).map(|l| l.files()).unwrap_or_default();
+                if drop_action(t, &files, &dir) { gdk::DragAction::MOVE } else { gdk::DragAction::COPY }
+            }
+        ));
+        drop.connect_leave(glib::clone!(#[weak(rename_to = c)] self, move |_| {
+            c.imp().hover.set(None);
+            c.queue_draw();
+        }));
+        drop.connect_drop(glib::clone!(
+            #[weak(rename_to = c)]
+            self,
+            #[upgrade_or]
+            false,
+            move |t, value, x, y| {
+                let Ok(list) = value.get::<gdk::FileList>() else { return false };
+                let files = list.files();
+                let (dir, _) = c.drop_dir(x, y);
+                let cut = drop_action(t, &files, &dir);
+                let paths: Vec<std::path::PathBuf> = files.iter().filter_map(|f| f.path()).filter(|p| p.parent() != Some(dir.as_path()) && *p != dir).collect();
+                if paths.is_empty() {
+                    return false;
+                }
+                c.emit(Action::Drop { files: paths, dir, cut });
+                true
+            }
+        ));
+        self.add_controller(drop);
+    }
+
+    /// Where a drop at (x, y) lands: a folder under the pointer, else the shown folder.
+    fn drop_dir(&self, x: f64, y: f64) -> (std::path::PathBuf, Option<u32>) {
+        let dir = self.dir();
+        if let Some(p) = self.hit(x, y) {
+            let m = self.model();
+            let idx = m.order[p];
+            let e = &m.entries[idx as usize];
+            if e.is_dir {
+                return (dir.join(&*e.name), Some(idx));
+            }
+        }
+        (dir, None)
     }
 
     fn on_scroll(&self, ctl: &gtk::EventControllerScroll, dx: f64, dy: f64) -> glib::Propagation {
@@ -1229,7 +1361,7 @@ impl Canvas {
             gdk::Key::Page_Down => target(per_page as isize),
             gdk::Key::Home => (len > 0).then_some(0),
             gdk::Key::End => len.checked_sub(1),
-            gdk::Key::Return | gdk::Key::KP_Enter => {
+            gdk::Key::Return | gdk::Key::KP_Enter if !state.contains(gdk::ModifierType::ALT_MASK) => {
                 if let Some(idx) = imp.cursor.get() {
                     self.emit(Action::Activate(idx));
                 }
@@ -1248,13 +1380,28 @@ impl Canvas {
                 });
                 return glib::Propagation::Stop;
             }
-            gdk::Key::c | gdk::Key::x | gdk::Key::v if ctrl => {
+            gdk::Key::c | gdk::Key::x | gdk::Key::v | gdk::Key::z if ctrl => {
                 let action = match key {
                     gdk::Key::c => "win.copy",
                     gdk::Key::x => "win.cut",
+                    gdk::Key::z => "win.undo",
                     _ => "win.paste",
                 };
                 let _ = self.activate_action(action, None);
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::F2 | gdk::Key::Delete | gdk::Key::KP_Delete | gdk::Key::space => {
+                let action = match key {
+                    gdk::Key::F2 => "win.rename",
+                    gdk::Key::space => "win.quicklook",
+                    _ if shift => "win.delete",
+                    _ => "win.trash",
+                };
+                let _ = self.activate_action(action, None);
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Return | gdk::Key::KP_Enter if state.contains(gdk::ModifierType::ALT_MASK) => {
+                let _ = self.activate_action("win.properties", None);
                 return glib::Propagation::Stop;
             }
             gdk::Key::Escape => {

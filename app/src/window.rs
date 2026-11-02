@@ -2,6 +2,9 @@
 use crate::canvas::ViewMode;
 use crate::clipboard;
 use crate::dialogs;
+use crate::ops;
+use crate::props;
+use crate::quicklook;
 use crate::stats;
 use crate::model::{GroupBy, SortBy};
 use crate::viewprops;
@@ -63,6 +66,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.zoom-in", &["<Control>plus", "<Control>equal"]),
         ("win.zoom-out", &["<Control>minus"]),
         ("win.filter", &["<Control>i"]),
+        ("win.new-folder", &["<Control><Shift>n"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -254,6 +258,11 @@ impl Win {
                 win.sync();
             }
         })));
+        *pane.on_drop.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |files, dir, cut| {
+            if let Some(win) = w.upgrade() {
+                clipboard::run_transfer(&win.toasts, files, dir, cut);
+            }
+        })));
         *pane.on_open_tab.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |path| {
             if let Some(win) = w.upgrade() {
                 win.add_tab_background(path);
@@ -396,6 +405,106 @@ impl Win {
         add("cut", |w| clipboard::copy(&w.pane(), true, &w.toasts));
         add("paste", |w| clipboard::paste(&w.pane(), &w.toasts));
         add("open-selected", |w| w.pane().open_selected(false));
+        add("open-with", |w| dialogs::open_with(w.window.upcast_ref(), w.pane().selected_paths()));
+        add("quicklook", |w| quicklook::show(w.window.upcast_ref(), &w.pane()));
+        add("properties", |w| {
+            let sel = w.pane().selected_paths();
+            props::show(w.window.upcast_ref(), if sel.len() == 1 { sel[0].clone() } else { w.pane().path() });
+        });
+        add("undo", |w| {
+            let msg = ops::undo().unwrap_or_else(|e| e);
+            w.toasts.add_toast(adw::Toast::new(&msg));
+        });
+        add("trash", |w| {
+            let paths = w.pane().selected_paths();
+            if paths.is_empty() {
+                return;
+            }
+            let toasts = w.toasts.clone();
+            glib::spawn_future_local(async move {
+                let p = paths.clone();
+                let res = gio::spawn_blocking(move || ops::trash(&p)).await.unwrap_or_else(|_| Err("trash crashed".into()));
+                let msg = match res {
+                    Ok(()) => {
+                        let n = paths.len();
+                        ops::record(ops::Undo::Trashed(paths));
+                        format!("Moved {n} item(s) to the trash · Ctrl+Z to undo")
+                    }
+                    Err(e) => format!("Trash failed: {e}"),
+                };
+                toasts.add_toast(adw::Toast::new(&msg));
+            });
+        });
+        add("delete", |w| {
+            let paths = w.pane().selected_paths();
+            if paths.is_empty() {
+                return;
+            }
+            let toasts = w.toasts.clone();
+            let text = format!("Permanently delete {} item(s)? This cannot be undone.", paths.len());
+            dialogs::confirm(w.window.upcast_ref(), "Delete Permanently", &text, "Delete", move || {
+                let (paths, toasts) = (paths.clone(), toasts.clone());
+                glib::spawn_future_local(async move {
+                    let n = paths.len();
+                    let res = gio::spawn_blocking(move || ops::delete_permanently(&paths)).await.unwrap_or_else(|_| Err("delete crashed".into()));
+                    toasts.add_toast(adw::Toast::new(&match res {
+                        Ok(()) => format!("Deleted {n} item(s)"),
+                        Err(e) => format!("Delete failed: {e}"),
+                    }));
+                });
+            });
+        });
+        add("rename", |w| {
+            let paths = w.pane().selected_paths();
+            let weak = w.weak();
+            match paths.len() {
+                0 => {}
+                1 => {
+                    let from = paths[0].clone();
+                    let name = from.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    dialogs::prompt(w.window.upcast_ref(), "Rename", "New name:", &name, move |new| {
+                        let Some(w) = weak.upgrade() else { return };
+                        match ops::rename(&from, new.trim()) {
+                            Ok(to) => {
+                                ops::record(ops::Undo::Moved(vec![(from.clone(), to.clone())]));
+                                w.pane().select_when_loaded(to.file_name().unwrap_or_default().to_os_string());
+                            }
+                            Err(e) => w.toasts.add_toast(adw::Toast::new(&format!("Rename failed: {e}"))),
+                        }
+                    });
+                }
+                _ => dialogs::batch_rename(w.window.upcast_ref(), paths, move |plan| {
+                    let Some(w) = weak.upgrade() else { return };
+                    let (mut done, mut errors) = (Vec::new(), Vec::new());
+                    for (from, name) in plan {
+                        match ops::rename(&from, &name) {
+                            Ok(to) => done.push((from, to)),
+                            Err(e) => errors.push(format!("{name}: {e}")),
+                        }
+                    }
+                    let msg = format!("Renamed {} item(s){}", done.len(), errors.first().map(|e| format!(" · {} failed ({e})", errors.len())).unwrap_or_default());
+                    ops::record(ops::Undo::Moved(done));
+                    w.toasts.add_toast(adw::Toast::new(&msg));
+                }),
+            }
+        });
+        add("new-folder", |w| {
+            let dir = w.pane().path();
+            let name = ops::unique(&dir.join("New Folder")).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let weak = w.weak();
+            dialogs::prompt(w.window.upcast_ref(), "New Folder", "Folder name:", &name, move |name| {
+                let Some(w) = weak.upgrade() else { return };
+                match ops::new_folder(&dir, name.trim()) {
+                    Ok(p) => {
+                        ops::record(ops::Undo::Created(vec![p.clone()]));
+                        w.pane().select_when_loaded(p.file_name().unwrap_or_default().to_os_string());
+                    }
+                    Err(e) => w.toasts.add_toast(adw::Toast::new(&format!("New folder failed: {e}"))),
+                }
+            });
+        });
+        add("make-symlink", |w| make_links(w, false));
+        add("make-hardlink", |w| make_links(w, true));
         add("open-tab-selected", |w| w.pane().open_selected(true));
         add("select-all", |w| {
             w.pane().canvas.update(|m| {
@@ -612,6 +721,18 @@ impl Win {
         }
         *self.place_paths.borrow_mut() = paths.into_inner();
     }
+}
+
+fn make_links(w: &Rc<Win>, hard: bool) {
+    let msg = match ops::make_links(&w.pane().selected_paths(), hard) {
+        Ok(made) => {
+            let n = made.len();
+            ops::record(ops::Undo::Created(made));
+            format!("Created {n} {} · Ctrl+Z to undo", if hard { "hard link(s)" } else { "symlink(s)" })
+        }
+        Err(e) => format!("Link failed: {e}"),
+    };
+    w.toasts.add_toast(adw::Toast::new(&msg));
 }
 
 /// View dropdown: mode, sort, group, hidden files, filter.

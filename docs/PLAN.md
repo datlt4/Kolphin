@@ -46,15 +46,15 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - ✅ Thống kê thư mục: số file theo đuôi, histogram dung lượng; dung lượng folder đệ quy (nền, huỷ được).
 - ✅ Đổi icon cho file/folder bằng cách chọn trong bộ Material; menu chuột phải; hiện full tên khi chọn.
 
-### M4 — Thao tác file
+### M4 — Thao tác file (phần lớn ✅ v0.6.0)
 - ✅ Cut/Copy/Paste cơ bản (clipboard chung với Nautilus).
-- Tạo symlink / hardlink.
-- Hàng đợi copy/move: pause/resume, xử lý trùng tên, tốc độ; copy giữa các HDD chạy tuần tự; tuỳ chọn kiểm tra lại bằng xxHash sau copy.
-- Trash/xoá/đổi tên, **Ctrl+Z undo**, đổi tên hàng loạt có xem trước (regex).
-- Kéo thả vào/ra app khác.
-- "Mở bằng…" + đặt app mặc định.
-- Properties + hash MD5 / SHA256 / SHA512 / xxHash trong **1 lần đọc**, so với giá trị trong clipboard.
-- **Quick Look (Space)**: xem nhanh ảnh/video/text, chế độ gallery.
+- ✅ Tạo symlink / hardlink; emblem symlink kiểu Ubuntu.
+- ✅ Hàng đợi copy/move chạy tuần tự, có % và tốc độ; trùng tên tự đổi "(copy)". Còn: pause/resume, hộp thoại xử lý trùng tên, kiểm tra lại bằng xxHash sau copy.
+- ✅ Trash/xoá/đổi tên (F2), folder mới, **Ctrl+Z undo** (rename, move, copy, trash, link), đổi tên hàng loạt có xem trước (regex, `{n}`).
+- ✅ Kéo thả vào/ra app khác (cùng ổ = move, khác ổ = copy; Shift/Ctrl để ép).
+- ✅ "Mở bằng…" + đặt app mặc định.
+- ✅ Properties + hash MD5 / SHA256 / SHA512 / xxHash3 trong **1 lần đọc**, tự so với hash trong clipboard.
+- ✅ **Quick Look (Space)**: ảnh, khung hình video, text; ←/→ chuyển file. Còn: phát video (cần libgtk-4-media-gstreamer).
 - **Mở file nén như folder** (zip/tar), menu nén/giải nén.
 
 ### M5 — Thiết bị & mạng

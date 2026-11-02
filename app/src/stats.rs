@@ -87,7 +87,7 @@ pub fn show(parent: &gtk::Window, dir: &Path, m: &Model) {
 }
 
 /// Sum file sizes under `root` without following symlinks; hard-linked files count once.
-fn walk(root: &Path, stop: &AtomicBool, tx: &async_channel::Sender<(u64, u64, bool)>) {
+pub fn walk(root: &Path, stop: &AtomicBool, tx: &async_channel::Sender<(u64, u64, bool)>) {
     let (mut n, mut size, mut last) = (0u64, 0u64, Instant::now());
     let mut seen = HashSet::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];

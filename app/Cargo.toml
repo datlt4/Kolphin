@@ -16,6 +16,8 @@ jpeg-decoder = "0.3"
 kamadak-exif = "0.6"
 md-5 = "0.10"
 png = "0.18"
+sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { version = "1", features = ["derive"] }
 regex = "1"
 resvg = { version = "0.49", default-features = false }

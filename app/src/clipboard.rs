@@ -1,8 +1,9 @@
-//! Cut / copy / paste of files through the system clipboard (Nautilus/GNOME format), transfers in the background.
+//! Cut / copy / paste of files through the system clipboard (Nautilus/GNOME format).
+use crate::ops;
 use crate::pane::Pane;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 const GNOME: &str = "x-special/gnome-copied-files";
@@ -43,18 +44,36 @@ pub fn paste(pane: &Rc<Pane>, toasts: &adw::ToastOverlay) {
         if sources.is_empty() {
             return;
         }
-        let status = adw::Toast::builder().title(format!("{} {} item(s)…", if cut { "Moving" } else { "Copying" }, sources.len())).timeout(0).build();
-        toasts.add_toast(status.clone());
-        let res = gio::spawn_blocking(move || transfer(&sources, &dest, cut)).await.unwrap_or_else(|_| Err("transfer crashed".into()));
-        status.dismiss();
-        match res {
-            Ok(n) => {
-                if cut {
-                    let _ = clip.set_content(None::<&gdk::ContentProvider>);
+        if cut {
+            let _ = clip.set_content(None::<&gdk::ContentProvider>);
+        }
+        run_transfer(&toasts, sources, dest, cut);
+    }));
+}
+
+/// Start a copy/move job and show its progress in a toast; the result can be undone.
+pub fn run_transfer(toasts: &adw::ToastOverlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool) {
+    let status = adw::Toast::builder().title(if cut { "Moving…" } else { "Copying…" }).timeout(0).build();
+    toasts.add_toast(status.clone());
+    let rx = ops::transfer(sources, dest, cut);
+    let started = std::time::Instant::now();
+    glib::spawn_future_local(glib::clone!(#[weak] toasts, async move {
+        while let Ok(p) = rx.recv().await {
+            match p.finished {
+                None => status.set_title(&ops::describe(&p, cut, started)),
+                Some(result) => {
+                    status.dismiss();
+                    let msg = match result {
+                        Ok(undo) => {
+                            ops::record(undo);
+                            format!("{} {} item(s) · Ctrl+Z to undo", if cut { "Moved" } else { "Copied" }, p.done_items)
+                        }
+                        Err(e) => format!("{} failed: {e}", if cut { "Move" } else { "Copy" }),
+                    };
+                    toasts.add_toast(adw::Toast::new(&msg));
+                    return;
                 }
-                toasts.add_toast(adw::Toast::new(&format!("{} {n} item(s)", if cut { "Moved" } else { "Pasted" })));
             }
-            Err(e) => toasts.add_toast(adw::Toast::new(&format!("Paste failed: {e}"))),
         }
     }));
 }
@@ -66,85 +85,9 @@ fn parse(mime: &str, text: &str) -> (bool, Vec<PathBuf>) {
     (cut, uris.iter().filter_map(|u| gio::File::for_uri(u).path()).collect())
 }
 
-/// Copy or move `sources` into `dest`; existing names get " (copy)", " (copy 2)", …
-fn transfer(sources: &[PathBuf], dest: &Path, cut: bool) -> Result<usize, String> {
-    let mut done = 0;
-    for src in sources {
-        let name = src.file_name().ok_or("bad path")?;
-        if cut && src.parent() == Some(dest) {
-            continue;
-        }
-        if dest.starts_with(src) {
-            return Err(format!("cannot put {} inside itself", src.display()));
-        }
-        let target = unique(&dest.join(name));
-        let moved = cut && std::fs::rename(src, &target).is_ok();
-        if !moved {
-            copy_tree(src, &target).map_err(|e| format!("{}: {e}", src.display()))?;
-            if cut {
-                let removed = if src.is_dir() && !src.is_symlink() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
-                removed.map_err(|e| format!("{}: {e}", src.display()))?;
-            }
-        }
-        done += 1;
-    }
-    Ok(done)
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(src)?;
-    if meta.file_type().is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
-    } else if meta.is_dir() {
-        std::fs::create_dir(dst)?;
-        for e in std::fs::read_dir(src)? {
-            let e = e?;
-            copy_tree(&e.path(), &dst.join(e.file_name()))?;
-        }
-        std::fs::set_permissions(dst, meta.permissions())
-    } else {
-        std::fs::copy(src, dst).map(|_| ())
-    }
-}
-
-fn unique(path: &Path) -> PathBuf {
-    if std::fs::symlink_metadata(path).is_err() {
-        return path.to_path_buf();
-    }
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-    (1..)
-        .map(|n| path.with_file_name(if n == 1 { format!("{stem} (copy){ext}") } else { format!("{stem} (copy {n}){ext}") }))
-        .find(|p| std::fs::symlink_metadata(p).is_err())
-        .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn copy_move_and_names() {
-        let root = std::env::temp_dir().join(format!("kolphin-clip-{}", std::process::id()));
-        let (a, b) = (root.join("a"), root.join("b"));
-        std::fs::create_dir_all(a.join("sub")).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join("f.txt"), "x").unwrap();
-        std::fs::write(a.join("sub/g.txt"), "y").unwrap();
-        std::os::unix::fs::symlink("f.txt", a.join("link")).unwrap();
-
-        assert_eq!(transfer(&[a.join("f.txt"), a.join("sub"), a.join("link")], &b, false), Ok(3));
-        assert!(b.join("sub/g.txt").exists() && b.join("link").is_symlink());
-        assert_eq!(transfer(&[a.join("f.txt")], &b, false), Ok(1));
-        assert!(b.join("f (copy).txt").exists());
-        assert_eq!(transfer(&[a.join("f.txt")], &a, false), Ok(1));
-        assert!(a.join("f (copy).txt").exists());
-
-        assert_eq!(transfer(&[a.join("sub")], &b, true), Ok(1));
-        assert!(!a.join("sub").exists() && b.join("sub (copy)/g.txt").exists());
-        assert!(transfer(std::slice::from_ref(&b), &b.join("sub"), false).is_err());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
 
     #[test]
     fn parses_clipboard() {

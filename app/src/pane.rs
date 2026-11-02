@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 type Callback = RefCell<Option<Box<dyn Fn()>>>;
 type PathCallback = RefCell<Option<Box<dyn Fn(PathBuf)>>>;
+type DropCallback = RefCell<Option<Box<dyn Fn(Vec<PathBuf>, PathBuf, bool)>>>;
 
 #[derive(Default)]
 struct Changes {
@@ -45,6 +46,8 @@ pub struct Pane {
     pub on_view: Callback,
     pub on_focus: Callback,
     pub on_open_tab: PathCallback,
+    /// Files dropped in: (sources, destination folder, move?).
+    pub on_drop: DropCallback,
 }
 
 impl Pane {
@@ -107,6 +110,7 @@ impl Pane {
             on_view: Default::default(),
             on_focus: Default::default(),
             on_open_tab: Default::default(),
+            on_drop: Default::default(),
         });
         let weak = Rc::downgrade(&pane);
         pane.pathbar.connect_go(glib::clone!(#[strong] weak, move |p| {
@@ -365,6 +369,13 @@ impl Pane {
         self.path.borrow().clone()
     }
 
+    /// Path of the item at display position `p`.
+    pub fn path_at(&self, p: usize) -> Option<PathBuf> {
+        let m = self.canvas.model();
+        let i = *m.order.get(p)?;
+        Some(self.path().join(&*m.entries[i as usize].name))
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         let dir = self.path();
         let m = self.canvas.model();
@@ -418,7 +429,7 @@ impl Pane {
         });
     }
 
-    fn select_when_loaded(self: &Rc<Self>, name: OsString) {
+    pub fn select_when_loaded(self: &Rc<Self>, name: OsString) {
         *self.pending_select.borrow_mut() = Some(name);
     }
 
@@ -544,6 +555,11 @@ impl Pane {
                 self.save_props();
             }
             Action::ContextMenu { x, y, on_item } => self.context_menu(x, y, on_item),
+            Action::Drop { files, dir, cut } => {
+                if let Some(f) = self.on_drop.borrow().as_ref() {
+                    f(files, dir, cut);
+                }
+            }
         }
     }
 
@@ -557,14 +573,17 @@ impl Pane {
             menu.append_section(None, &s);
         };
         if on_item {
-            section(&[("Open", "win.open-selected"), ("Open in New Tab", "win.open-tab-selected")]);
+            section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook")]);
             section(&[("Cut", "win.cut"), ("Copy", "win.copy"), ("Paste", "win.paste"), ("Copy Path", "win.copy-path")]);
+            section(&[("Rename… (F2)", "win.rename"), ("Move to Trash (Del)", "win.trash"), ("Delete Permanently", "win.delete")]);
+            section(&[("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink")]);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
+            section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {
-            section(&[("Paste", "win.paste"), ("Select All", "win.select-all")]);
+            section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder"), ("Select All", "win.select-all")]);
             section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
+            section(&[("Folder Statistics…", "win.stats"), ("Properties", "win.properties")]);
         }
-        section(&[("Folder Statistics…", "win.stats")]);
         let pop = gtk::PopoverMenu::from_model(Some(&menu));
         pop.set_parent(&self.canvas);
         pop.set_has_arrow(false);
@@ -660,6 +679,7 @@ impl Pane {
             m.remove_names(&deleted);
             m.append(added);
         });
+        self.try_select_pending();
         self.read_dims();
     }
 
