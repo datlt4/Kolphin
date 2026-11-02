@@ -36,6 +36,23 @@ const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
 
+/// Wrap long names without inserting "-" at the break.
+fn no_hyphens(layout: &pango::Layout) {
+    let attrs = layout.attributes().unwrap_or_default();
+    attrs.insert(pango::AttrInt::new_insert_hyphens(false));
+    layout.set_attributes(Some(&attrs));
+}
+
+/// Pango markup for a name; symlinks get a dim ↪ after it.
+fn name_markup(name: &str, symlink: bool) -> String {
+    let name = glib::markup_escape_text(name);
+    if symlink {
+        format!("{name} <span foreground='#8b91a1'>↪</span>")
+    } else {
+        name.to_string()
+    }
+}
+
 /// One group laid out along the scroll axis.
 struct Sec {
     start: usize,
@@ -514,7 +531,7 @@ impl Canvas {
     fn text_for(&self, idx: u32, g: &Geometry, details_name_w: f64) -> Ref<'_, Text> {
         let imp = self.imp();
         let width = match self.mode() {
-            ViewMode::Icons => g.cell_w - 8.0,
+            ViewMode::Icons => g.cell_w - 20.0,
             ViewMode::Compact => g.cell_w - g.icon - 32.0,
             ViewMode::Details => details_name_w,
         };
@@ -525,14 +542,15 @@ impl Canvas {
         if !imp.texts.borrow().contains_key(&idx) {
             let m = self.model();
             let e = &m.entries[idx as usize];
-            let label = e.name.to_string_lossy();
-            let name = self.create_pango_layout(Some(&if e.symlink { format!("{label} ↪") } else { label.into_owned() }));
+            let name = self.create_pango_layout(None);
+            name.set_markup(&name_markup(&e.name.to_string_lossy(), e.symlink));
             name.set_width((width.max(1.0) * pango::SCALE as f64) as i32);
             name.set_ellipsize(pango::EllipsizeMode::End);
             if self.mode() == ViewMode::Icons {
                 name.set_wrap(pango::WrapMode::WordChar);
                 name.set_height(-2);
                 name.set_alignment(pango::Alignment::Center);
+                no_hyphens(&name);
             }
             let columns = (self.mode() == ViewMode::Details).then(|| {
                 let size = if e.size == UNKNOWN_SIZE { String::new() } else { glib::format_size(e.size).to_string() };
@@ -590,6 +608,9 @@ impl Canvas {
         snap.push_clip(&rect(0.0, 0.0, w, h));
         let visible = g.items_in(sx, sy, sx + w, sy + h);
         let focus = self.has_focus();
+        let elev = style.lookup_color("kolphin_elev").unwrap_or(hover);
+        let border = style.lookup_color("kolphin_border").unwrap_or(alpha(&fg, 0.12));
+        let mut expand = None;
         for &p in &visible {
             let (idx, selected, icon, symlink, nlink) = {
                 let m = self.model();
@@ -628,38 +649,50 @@ impl Canvas {
                 ViewMode::Icons => (x + (g.cell_w - g.icon) / 2.0, y + 10.0),
                 _ => (x + 12.0, y + (g.cell_h - g.icon) / 2.0),
             };
-            if let Some(tex) = thumb {
+            let drawn_icon = if let Some(tex) = thumb {
                 // Fit the preview in the icon box, keeping its aspect ratio.
                 let (tw, th) = (tex.width() as f64, tex.height() as f64);
                 let s = g.icon / tw.max(th);
                 let r = rect(ix + (g.icon - tw * s) / 2.0, iy + (g.icon - th * s) / 2.0, tw * s, th * s);
-                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(r, if g.icon > 40.0 { 6.0 } else { 3.0 }));
+                let corner = if g.icon > 40.0 { 6.0 } else { 3.0 };
+                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(r, corner));
                 snap.append_texture(&tex, &r);
                 snap.pop();
+                Some((tex, r, corner))
             } else if let Some(tex) = icons::texture(icon, (g.icon * scale).round() as u32) {
-                snap.append_texture(&tex, &rect(ix, iy, g.icon, g.icon));
-            }
-            // Link badges: ↪ symlink (bottom-left), ×N hard links (bottom-right).
+                let r = rect(ix, iy, g.icon, g.icon);
+                snap.append_texture(&tex, &r);
+                Some((tex, r, 0.0))
+            } else {
+                None
+            };
+            // Link badges: ↪ symlink (bottom-left), ×N hard links (bottom-right), dark chips like the UI.
             for (text, right) in [(symlink.then(|| "↪".to_string()), false), ((nlink > 1).then(|| format!("×{nlink}")), true)] {
                 let Some(text) = text else { continue };
                 let l = self.create_pango_layout(None);
-                l.set_markup(&format!("<span size='{}' weight='700'>{text}</span>", if g.icon >= 48.0 { "small" } else { "x-small" }));
-                let (lw, lh) = (l.pixel_size().0 as f64 + 6.0, l.pixel_size().1 as f64);
-                let bx = if right { ix + g.icon - lw + 2.0 } else { ix - 2.0 };
-                let r = rect(bx, iy + g.icon - lh + 2.0, lw, lh);
-                snap.push_rounded_clip(&gsk::RoundedRect::from_rect(r, lh as f32 / 2.0));
-                snap.append_color(&accent, &r);
+                l.set_markup(&format!("<span size='{}' weight='600'>{text}</span>", if g.icon >= 48.0 { "small" } else { "x-small" }));
+                let (tw, lh) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64 + 2.0);
+                let lw = (tw + 8.0).max(lh);
+                let bx = if right { ix + g.icon - lw + 3.0 } else { ix - 3.0 };
+                let by = iy + g.icon - lh + 3.0;
+                let chip = gsk::RoundedRect::from_rect(rect(bx, by, lw, lh), lh as f32 / 2.0);
+                snap.push_rounded_clip(&chip);
+                snap.append_color(&elev, &rect(bx, by, lw, lh));
                 snap.pop();
+                snap.append_border(&chip, &[1.0; 4], &[border, border, border, border]);
                 snap.save();
-                snap.translate(&graphene::Point::new((bx + 3.0) as f32, (iy + g.icon - lh + 2.0) as f32));
-                snap.append_layout(&l, &gdk::RGBA::WHITE);
+                snap.translate(&graphene::Point::new((bx + (lw - tw) / 2.0) as f32, (by + 1.0) as f32));
+                snap.append_layout(&l, &muted);
                 snap.restore();
+            }
+            if self.mode() == ViewMode::Icons && selected && imp.cursor.get() == Some(idx) {
+                expand = Some((idx, x, y, drawn_icon.clone()));
             }
 
             let text = self.text_for(idx, &g, name_w);
             let th = text.name.pixel_size().1 as f64;
             let (tx, ty) = match self.mode() {
-                ViewMode::Icons => (x + 4.0, y + 10.0 + g.icon + 6.0),
+                ViewMode::Icons => (x + 10.0, y + 10.0 + g.icon + 6.0),
                 ViewMode::Compact => (x + 12.0 + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
                 ViewMode::Details => (name_x, y + (g.cell_h - th) / 2.0),
             };
@@ -675,6 +708,45 @@ impl Canvas {
                     snap.append_layout(layout, &dim);
                     snap.restore();
                 }
+            }
+        }
+
+        // The focused selected icon shows its whole name, spilling over the items below (like Dolphin).
+        if let Some((idx, x, y, drawn_icon)) = expand {
+            let e_name = {
+                let m = self.model();
+                let e = &m.entries[idx as usize];
+                name_markup(&e.name.to_string_lossy(), e.symlink)
+            };
+            let full = self.create_pango_layout(None);
+            full.set_markup(&e_name);
+            full.set_width(((g.cell_w - 20.0) * pango::SCALE as f64) as i32);
+            full.set_wrap(pango::WrapMode::WordChar);
+            full.set_alignment(pango::Alignment::Center);
+            no_hyphens(&full);
+            let short_h = self.text_for(idx, &g, name_w).name.pixel_size().1 as f64;
+            let full_h = full.pixel_size().1 as f64;
+            if full_h > short_h {
+                // The whole cell grows downwards; the icon is drawn again on top of the fill.
+                let ty = y + 10.0 + g.icon + 6.0;
+                let r = rect(x + 4.0, y + 4.0, g.cell_w - 8.0, ty + full_h + 8.0 - (y + 4.0));
+                let shape = gsk::RoundedRect::from_rect(r, 8.0);
+                let bg = style.lookup_color("window_bg_color").unwrap_or(elev);
+                snap.push_rounded_clip(&shape);
+                snap.append_color(&bg, &r);
+                snap.append_color(&alpha(&accent, 0.2), &r);
+                snap.pop();
+                let c = alpha(&accent, 0.9);
+                snap.append_border(&shape, &[1.0; 4], &[c, c, c, c]);
+                if let Some((tex, ir, corner)) = drawn_icon {
+                    snap.push_rounded_clip(&gsk::RoundedRect::from_rect(ir, corner));
+                    snap.append_texture(&tex, &ir);
+                    snap.pop();
+                }
+                snap.save();
+                snap.translate(&graphene::Point::new((x + 10.0) as f32, ty as f32));
+                snap.append_layout(&full, &fg);
+                snap.restore();
             }
         }
 
