@@ -38,23 +38,78 @@ pub fn eject(parent: &gtk::Window, m: gio::Mount, done: impl FnOnce(Result<(), S
     }
 }
 
+pub enum Connected {
+    Path(PathBuf),
+    /// A server address without a share (smb://host): pick one of these (name, URI).
+    Shares(Vec<(String, String)>),
+}
+
+/// `smb://host:445/x` → `smb://host/x` (445 is SMB's default port; gvfs treats an explicit one as another server).
+pub fn normalize(uri: &str) -> String {
+    let uri = uri.trim();
+    match uri.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("smb") => {
+            let (host, path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
+            format!("smb://{}/{path}", host.strip_suffix(":445").unwrap_or(host))
+        }
+        _ => uri.to_string(),
+    }
+}
+
 /// Mount `smb://`, `sftp://`, `ftp://`, `dav://` … through gvfs; passwords go through GTK's dialog and the keyring.
-pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<PathBuf, String>) + 'static) {
-    let file = gio::File::for_uri(uri.trim());
+pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<Connected, String>) + 'static) {
+    let file = gio::File::for_uri(&normalize(uri));
     let op = gtk::MountOperation::new(Some(parent));
     let f = file.clone();
     file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |res| {
-        let ok = match res {
-            Ok(()) => Ok(()),
-            Err(e) if e.matches(gio::IOErrorEnum::AlreadyMounted) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-        done(ok.and_then(|_| f.path().ok_or_else(|| "this share has no local path (is gvfs-fuse running?)".into())));
+        match res {
+            Ok(()) => {}
+            Err(e) if e.matches(gio::IOErrorEnum::AlreadyMounted) => {}
+            Err(e) => return done(Err(e.to_string())),
+        }
+        if let Some(path) = f.path() {
+            return done(Ok(Connected::Path(path)));
+        }
+        // Browsing a server: list its shares instead.
+        glib::spawn_future_local(async move {
+            let attrs = "standard::name,standard::display-name,standard::target-uri";
+            let list = f.enumerate_children_future(attrs, gio::FileQueryInfoFlags::NONE, glib::Priority::DEFAULT).await;
+            let shares = match list {
+                Ok(en) => {
+                    let mut out = Vec::new();
+                    while let Ok(infos) = en.next_files_future(64, glib::Priority::DEFAULT).await {
+                        if infos.is_empty() {
+                            break;
+                        }
+                        // Browse entries are mountables: their real address is target-uri.
+                        out.extend(
+                            infos
+                                .iter()
+                                .map(|i| {
+                                    let uri = i.attribute_string("standard::target-uri").map_or_else(|| f.child(i.name()).uri().to_string(), |u| u.to_string());
+                                    (i.display_name().to_string(), uri)
+                                })
+                                .filter(|(name, _)| !name.ends_with('$')),
+                        );
+                    }
+                    out
+                }
+                Err(e) => return done(Err(e.to_string())),
+            };
+            done(if shares.is_empty() { Err("the server has no shares you can open".into()) } else { Ok(Connected::Shares(shares)) });
+        });
     });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalizes_smb() {
+        assert_eq!(super::normalize("smb://192.168.0.186:445"), "smb://192.168.0.186/");
+        assert_eq!(super::normalize(" smb://nas:445/HOME "), "smb://nas/HOME");
+        assert_eq!(super::normalize("sftp://u@h:22/x"), "sftp://u@h:22/x");
+    }
+
     #[test]
     fn usage_of_root() {
         let (free, size) = super::usage(std::path::Path::new("/")).unwrap();

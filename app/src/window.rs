@@ -1,6 +1,9 @@
 //! Main window: places sidebar, tabs, split view, header bar and window actions.
 use crate::canvas::ViewMode;
+use crate::actions;
 use crate::clipboard;
+use crate::kermius;
+use crate::palette;
 use crate::devices;
 use crate::dialogs;
 use crate::ops;
@@ -36,6 +39,8 @@ pub struct Win {
     pub toasts: adw::ToastOverlay,
     tab_list: RefCell<Vec<Rc<Tab>>>,
     show_hidden: Cell<bool>,
+    /// Last folder sent to (or reported by) the Kermius terminal.
+    last_cd: RefCell<Option<PathBuf>>,
     content: gtk::Paned,
     sidebar: gtk::Box,
     main_col: gtk::Box,
@@ -69,6 +74,8 @@ pub fn set_accels(app: &adw::Application) {
         ("win.filter", &["<Control>i"]),
         ("win.new-folder", &["<Control><Shift>n"]),
         ("win.show-sidebar", &["F9"]),
+        ("win.terminal", &["F4"]),
+        ("win.palette", &["<Control>k"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -125,6 +132,8 @@ impl Win {
         menu.append(Some("Random Sample…"), Some("win.random-sample"));
         menu.append(Some("Folder Statistics…"), Some("win.stats"));
         menu.append(Some("Connect to Server…"), Some("win.connect-server"));
+        menu.append(Some("Command Palette (Ctrl+K)"), Some("win.palette"));
+        menu.append(Some("Edit Custom Actions…"), Some("win.edit-actions"));
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
@@ -179,6 +188,7 @@ impl Win {
             toasts,
             tab_list: Default::default(),
             show_hidden: Default::default(),
+            last_cd: Default::default(),
             places,
             place_paths: Default::default(),
         });
@@ -340,6 +350,12 @@ impl Win {
     fn sync(&self) {
         let Some(tab) = self.current_tab() else { return };
         let pane = tab.pane();
+        // Kolphin's terminal follows the active view.
+        let path = pane.path();
+        if kermius::get().has_terminal() && self.last_cd.borrow().as_ref() != Some(&path) {
+            *self.last_cd.borrow_mut() = Some(path.clone());
+            kermius::get().cd(&path);
+        }
         self.window.set_title(Some(&format!("{} — Kolphin", folder_name(&pane.path()))));
         let mode = pane.canvas.mode();
         if let Some(a) = self.action("view-mode") {
@@ -436,15 +452,44 @@ impl Win {
             let msg = ops::undo().unwrap_or_else(|e| e);
             w.toasts.add_toast(adw::Toast::new(&msg));
         });
+        add("restore", |w| {
+            let msg = match ops::restore_from_trash(&w.pane().selected_paths()) {
+                Ok(n) => format!("Restored {n} item(s)"),
+                Err(e) => format!("Restore failed: {e}"),
+            };
+            w.toasts.add_toast(adw::Toast::new(&msg));
+            w.fill_places();
+        });
+        add("empty-trash", |w| {
+            let weak = w.weak();
+            let dir = w.pane().path();
+            let text = "Permanently delete everything in this trash? This cannot be undone.";
+            dialogs::confirm(w.window.upcast_ref(), "Empty Trash", text, "Empty Trash", move || {
+                let Some(w) = weak.upgrade() else { return };
+                let msg = match ops::empty_trash(std::slice::from_ref(&dir)) {
+                    Ok(n) => format!("Deleted {n} item(s) from the trash"),
+                    Err(e) => format!("Empty trash failed: {e}"),
+                };
+                w.toasts.add_toast(adw::Toast::new(&msg));
+                w.fill_places();
+            });
+        });
         add("trash", |w| {
             let paths = w.pane().selected_paths();
             if paths.is_empty() {
                 return;
             }
-            let toasts = w.toasts.clone();
+            // Inside a trash, Delete means delete for good.
+            if ops::is_trash(&w.pane().path()) {
+                return gio::prelude::ActionGroupExt::activate_action(&w.window, "delete", None);
+            }
+            let (toasts, weak) = (w.toasts.clone(), w.weak());
             glib::spawn_future_local(async move {
                 let p = paths.clone();
                 let res = gio::spawn_blocking(move || ops::trash(&p)).await.unwrap_or_else(|_| Err("trash crashed".into()));
+                if let Some(w) = weak.upgrade() {
+                    w.fill_places();
+                }
                 let msg = match res {
                     Ok(items) => {
                         let n = items.len();
@@ -532,6 +577,48 @@ impl Win {
                 }
             });
         });
+        add("palette", |w| palette::show(w.window.upcast_ref()));
+        add("terminal", |w| {
+            let k = kermius::get();
+            // The shell's cd moves this window's active view (unless it is already there).
+            let weak = w.weak();
+            *k.on_cwd.borrow_mut() = Some(Box::new(move |cwd| {
+                if let Some(win) = weak.upgrade() {
+                    let pane = win.pane();
+                    if pane.path() != cwd && cwd.is_dir() {
+                        *win.last_cd.borrow_mut() = Some(cwd.clone());
+                        pane.navigate(cwd);
+                    }
+                }
+            }));
+            let path = w.pane().path();
+            *w.last_cd.borrow_mut() = Some(path.clone());
+            k.open_terminal(&path);
+        });
+        add("share", |w| {
+            let mut paths = w.pane().selected_paths();
+            if paths.is_empty() {
+                paths.push(w.pane().path());
+            }
+            if !kermius::get().share(paths) {
+                w.toasts.add_toast(adw::Toast::new("Sharing needs Kermius (Nearby Share)"));
+            }
+        });
+        add("edit-actions", |w| {
+            let _ = actions::load();
+            let uri = gio::File::for_path(actions::config_file()).uri();
+            let _ = gio::AppInfo::launch_default_for_uri(&uri, Some(&WidgetExt::display(&w.window).app_launch_context()));
+        });
+        let custom = gio::SimpleAction::new("custom-action", Some(glib::VariantTy::INT32));
+        let w = self.weak();
+        custom.connect_activate(move |_, v| {
+            let (Some(win), Some(i)) = (w.upgrade(), v.and_then(|v| v.get::<i32>())) else { return };
+            let Some(a) = actions::load().into_iter().nth(i as usize) else { return };
+            if let Err(e) = actions::run(&a, &win.pane().path(), &win.pane().selected_paths()) {
+                win.toasts.add_toast(adw::Toast::new(&format!("{}: {e}", a.name)));
+            }
+        });
+        self.window.add_action(&custom);
         add("make-symlink", |w| make_links(w, false));
         add("make-hardlink", |w| make_links(w, true));
         add("open-tab-selected", |w| w.pane().open_selected(true));
@@ -730,9 +817,23 @@ impl Win {
 
     fn connect_server(self: &Rc<Self>, uri: String) {
         let weak = self.weak();
+        let uri = devices::normalize(&uri);
         let u = uri.clone();
         self.toasts.add_toast(adw::Toast::new(&format!("Connecting to {uri}…")));
-        devices::connect(self.window.upcast_ref(), &uri, move |res| win_open(&weak, res, Some(u)));
+        devices::connect(self.window.upcast_ref(), &uri, move |res| match res {
+            Ok(devices::Connected::Path(p)) => win_open(&weak, Ok(p), Some(u)),
+            Ok(devices::Connected::Shares(shares)) => {
+                let Some(win) = weak.upgrade() else { return };
+                let w2 = win.weak();
+                let names = shares.iter().map(|(n, _)| n.clone()).collect();
+                dialogs::choose(win.window.upcast_ref(), "Choose a Share", &format!("Shares on {u}"), names, move |i| {
+                    if let Some(win) = w2.upgrade() {
+                        win.connect_server(shares[i].1.clone());
+                    }
+                });
+            }
+            Err(e) => win_open(&weak, Err(e), None),
+        });
     }
 
     fn fill_places(self: &Rc<Self>) {
@@ -790,9 +891,26 @@ impl Win {
             }
         }
 
+        // Trash: the home one always, plus non-empty trashes on other volumes (NTFS drives keep their own).
+        let monitor = gio::VolumeMonitor::get();
+        let tops: Vec<(PathBuf, String)> = monitor.mounts().iter().filter_map(|m| Some((m.root().path()?, m.name().to_string()))).collect();
+        let dirs = ops::trash_dirs(&tops.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+        for (i, dir) in dirs.into_iter().enumerate() {
+            let full = std::fs::read_dir(&dir).is_ok_and(|mut r| r.next().is_some());
+            if i > 0 && !full {
+                continue;
+            }
+            let name = if i == 0 {
+                "Trash".to_string()
+            } else {
+                let on = tops.iter().find(|(t, _)| dir.starts_with(t)).map_or("drive".to_string(), |(_, n)| n.clone());
+                format!("Trash on {on}")
+            };
+            add(themed(if full { "user-trash-full-symbolic" } else { "user-trash-symbolic" }), &name, Place::Path(dir), None, None);
+        }
+
         title("DEVICES");
         add(themed("drive-harddisk-symbolic"), "Root", Place::Path(PathBuf::from("/")), devices::usage(std::path::Path::new("/")), None);
-        let monitor = gio::VolumeMonitor::get();
         let mut network = Vec::new();
         for m in monitor.mounts() {
             let Some(path) = m.root().path() else { continue };
@@ -819,7 +937,9 @@ impl Win {
                 add(m.symbolic_icon(), &m.name(), Place::Path(path), None, Some(m.clone()));
             }
         }
-        for uri in viewprops::recent_servers().into_iter().filter(|u| !shown.iter().any(|s| s.starts_with(u.trim_end_matches('/')))) {
+        // gvfs lower-cases share names in its URIs, so compare without case.
+        let shown: Vec<String> = shown.iter().map(|s| s.to_lowercase()).collect();
+        for uri in viewprops::recent_servers().into_iter().filter(|u| !shown.iter().any(|s| s.starts_with(&u.trim_end_matches('/').to_lowercase()))) {
             add(themed("network-server-symbolic"), &uri, Place::Server(uri.clone()), None, None);
         }
         add(themed("list-add-symbolic"), "Connect to Server…", Place::Connect, None, None);

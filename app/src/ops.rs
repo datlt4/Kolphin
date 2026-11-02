@@ -81,7 +81,7 @@ fn trash_on_volume(p: &Path) -> Result<PathBuf, String> {
     trash_into(&top.join(format!(".Trash-{}", uid())), &real)
 }
 
-fn uid() -> u32 {
+pub fn uid() -> u32 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| s.lines().find(|l| l.starts_with("Uid:"))?.split_whitespace().nth(1)?.parse().ok())
@@ -150,6 +150,64 @@ fn restore_gio(paths: &[PathBuf]) -> Result<usize, String> {
             file.move_(&gio::File::for_path(p), gio::FileCopyFlags::NONE, None::<&gio::Cancellable>, None)
                 .map_err(|e| format!("{}: {e}", p.display()))?;
             n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// `files/` of every trash: the home one, then `<mount>/.Trash-<uid>` and `<mount>/.Trash/<uid>` that exist.
+pub fn trash_dirs(mount_tops: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![glib::user_data_dir().join("Trash/files")];
+    for top in mount_tops {
+        for t in [top.join(format!(".Trash-{}", uid())), top.join(".Trash").join(uid().to_string())] {
+            if t.join("files").is_dir() {
+                dirs.push(t.join("files"));
+            }
+        }
+    }
+    dirs
+}
+
+pub fn is_trash(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == "files") && dir.parent().and_then(Path::file_name).is_some_and(|n| n.to_string_lossy().starts_with(".Trash") || n == "Trash" || n.to_string_lossy() == uid().to_string())
+}
+
+/// Put items from a trash `files/` folder back where their .trashinfo says they came from.
+pub fn restore_from_trash(items: &[PathBuf]) -> Result<usize, String> {
+    let mut n = 0;
+    for item in items {
+        let (Some(files), Some(name)) = (item.parent(), item.file_name()) else { continue };
+        let trash = files.parent().ok_or("not in a trash")?;
+        let info = trash.join("info").join(format!("{}.trashinfo", name.to_string_lossy()));
+        let text = std::fs::read_to_string(&info).map_err(|e| format!("{}: {e}", info.display()))?;
+        let raw = text.lines().find_map(|l| l.strip_prefix("Path=")).ok_or("no Path in .trashinfo")?;
+        let orig = PathBuf::from(glib::Uri::unescape_string(raw, None::<&str>).map_or_else(|| raw.to_string(), |s| s.to_string()));
+        // Relative paths are relative to the volume holding the trash.
+        let orig = if orig.is_absolute() { orig } else { trash.parent().map(|t| if t.ends_with(".Trash") { t.parent().unwrap_or(t) } else { t }).unwrap_or(trash).join(orig) };
+        let dest = unique(&orig);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        move_path(item, &dest).map_err(|e| format!("{}: {e}", item.display()))?;
+        let _ = std::fs::remove_file(&info);
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Delete everything in these trashes; returns how many items went.
+pub fn empty_trash(dirs: &[PathBuf]) -> Result<usize, String> {
+    let mut n = 0;
+    for files in dirs {
+        let trash = files.parent().unwrap_or(files);
+        for sub in ["files", "info", "expunged"] {
+            let Ok(rd) = std::fs::read_dir(trash.join(sub)) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let r = if p.is_dir() && !p.is_symlink() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+                r.map_err(|err| format!("{}: {err}", p.display()))?;
+                n += (sub == "files") as usize;
+            }
         }
     }
     Ok(n)
@@ -409,6 +467,15 @@ mod tests {
         assert!(std::fs::read_to_string(tdir.join("info/link.trashinfo")).unwrap().contains("Path="));
         assert_eq!(restore(&[Trashed { orig: b.join("link"), at: Some(at) }]), Ok(1));
         assert!(b.join("link").is_symlink() && !tdir.join("info/link.trashinfo").exists());
+
+        // Restore from a trash folder by its .trashinfo, then empty it.
+        let at = trash_into(&tdir, &b.join("link")).unwrap();
+        assert!(is_trash(at.parent().unwrap()));
+        assert_eq!(restore_from_trash(&[at]), Ok(1));
+        assert!(b.join("link").is_symlink());
+        trash_into(&tdir, &b.join("link")).unwrap();
+        assert_eq!(empty_trash(&[tdir.join("files")]), Ok(1));
+        assert!(std::fs::read_dir(tdir.join("info")).unwrap().next().is_none());
 
         let renamed = rename(&b.join("f.txt"), "h.txt").unwrap();
         assert!(renamed.exists() && rename(&renamed, "f (copy).txt").is_err());

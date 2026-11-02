@@ -1,10 +1,14 @@
+mod actions;
 mod canvas;
 mod clipboard;
 mod devices;
 mod dialogs;
+mod git;
 mod icons;
+mod kermius;
 mod model;
 mod ops;
+mod palette;
 mod pane;
 mod pathbar;
 mod props;
@@ -90,6 +94,8 @@ tabbar tab:selected { background: #262b38; color: #ffffff; box-shadow: inset 0 0
 .side-title-label { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: @kolphin_faint; margin-top: 6px; }
 progressbar trough { min-height: 6px; border-radius: 99px; background: @kolphin_elev; }
 progressbar progress { min-height: 6px; border-radius: 99px; background: @accent_color; }
+.palette row { padding: 8px 10px; border-radius: 8px; }
+.palette row:selected { background: alpha(@accent_color, 0.18); }
 .statusbar { color: @kolphin_muted; padding: 7px 16px; font-size: 12px; border-top: 1px solid @kolphin_border; }
 .pane-inactive .pathbar, .pane-inactive .statusbar { opacity: 0.5; }
 .pane-close { margin: 10px 10px 6px 0; border-radius: 8px; }

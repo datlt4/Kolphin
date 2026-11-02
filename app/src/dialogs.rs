@@ -83,6 +83,27 @@ pub fn pick_icon(parent: &gtk::Window, f: impl Fn(&'static str) + 'static) {
     search.grab_focus();
 }
 
+/// Pick one item from a list; `f` gets its index.
+pub fn choose(parent: &gtk::Window, title: &str, hint: &str, items: Vec<String>, f: impl Fn(usize) + 'static) {
+    let (win, body) = dialog(parent, title, 420, 420);
+    body.append(&gtk::Label::builder().label(hint).xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    let list = gtk::ListBox::builder().css_classes(["palette"]).build();
+    for item in &items {
+        list.append(&gtk::Label::builder().label(item).xalign(0.0).build());
+    }
+    body.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).build());
+    list.connect_row_activated(glib::clone!(#[weak] win, move |_, row| {
+        if (row.index() as usize) < items.len() {
+            f(row.index() as usize);
+        }
+        win.close();
+    }));
+    win.present();
+    if let Some(r) = list.row_at_index(0) {
+        r.grab_focus();
+    }
+}
+
 /// Yes/no question; `f` runs only on confirmation.
 pub fn confirm(parent: &gtk::Window, title: &str, text: &str, action: &str, f: impl Fn() + 'static) {
     let (win, body) = dialog(parent, title, 420, -1);

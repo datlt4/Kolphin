@@ -216,6 +216,7 @@ mod imp {
         pub thumb_tx: RefCell<Option<thumbs::Sender>>,
         pub thumb_requested: Cell<bool>,
         pub dir: RefCell<std::path::PathBuf>,
+        pub git: RefCell<std::collections::HashMap<std::ffi::OsString, char>>,
     }
 
     impl Default for Canvas {
@@ -248,6 +249,7 @@ mod imp {
                 thumb_tx: Default::default(),
                 thumb_requested: Default::default(),
                 dir: Default::default(),
+                git: Default::default(),
             }
         }
     }
@@ -377,6 +379,7 @@ impl Canvas {
         imp.vadj.set_value(0.0);
         imp.hadj.set_value(0.0);
         imp.thumbs.borrow_mut().clear();
+        imp.git.borrow_mut().clear();
         imp.thumb_gen.set(imp.thumb_gen.get().wrapping_add(1));
         self.update(|_| {});
     }
@@ -664,6 +667,11 @@ impl Canvas {
         let mut expand = None;
         let custom = crate::viewprops::has_custom_icons().then(|| self.dir());
         for &p in &visible {
+            let git = {
+                let m = self.model();
+                let g = imp.git.borrow();
+                if g.is_empty() { None } else { g.get(m.entries[m.order[p] as usize].name.as_ref()).copied() }
+            };
             let (idx, selected, icon, symlink, nlink) = {
                 let m = self.model();
                 let idx = m.order[p];
@@ -740,6 +748,29 @@ impl Canvas {
                 snap.save();
                 snap.translate(&graphene::Point::new((cx + (d - aw) / 2.0) as f32, (cy + (d - ah) / 2.0) as f32));
                 snap.append_layout(&l, &gdk::RGBA::WHITE);
+                snap.restore();
+            }
+            // Git status: a coloured letter chip on the top-right.
+            if let Some(c) = git {
+                let color = match c {
+                    'M' => gdk::RGBA::new(0.96, 0.78, 0.3, 1.0),
+                    'D' => gdk::RGBA::new(1.0, 0.36, 0.45, 1.0),
+                    'U' => gdk::RGBA::new(1.0, 0.6, 0.2, 1.0),
+                    _ => gdk::RGBA::new(0.29, 0.87, 0.5, 1.0),
+                };
+                let l = self.create_pango_layout(None);
+                l.set_markup(&format!("<span size='{}' weight='800'>{}</span>", if g.icon >= 48.0 { "small" } else { "x-small" }, if c == '?' { 'U' } else { c }));
+                let (tw, th) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64);
+                let d = (th + 2.0).max(tw + 6.0);
+                let (gx, gy) = (ix + g.icon - d * 0.6, iy - d * 0.25);
+                let chip = gsk::RoundedRect::from_rect(rect(gx, gy, d, th + 2.0), ((th + 2.0) / 2.0) as f32);
+                snap.push_rounded_clip(&chip);
+                snap.append_color(&elev, &rect(gx, gy, d, th + 2.0));
+                snap.pop();
+                snap.append_border(&chip, &[1.0; 4], &[color, color, color, color]);
+                snap.save();
+                snap.translate(&graphene::Point::new((gx + (d - tw) / 2.0) as f32, (gy + 1.0) as f32));
+                snap.append_layout(&l, &color);
                 snap.restore();
             }
             // Hard links: a dark ×N chip on the bottom-left.
@@ -953,6 +984,12 @@ impl Canvas {
     }
 
     /// Folder whose entries are shown (thumbnail paths are built from it).
+    /// Git status letters for the shown entries (empty outside a repository).
+    pub fn set_git(&self, map: std::collections::HashMap<std::ffi::OsString, char>) {
+        *self.imp().git.borrow_mut() = map;
+        self.queue_draw();
+    }
+
     pub fn set_dir(&self, dir: std::path::PathBuf) {
         *self.imp().dir.borrow_mut() = dir;
     }

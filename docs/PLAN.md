@@ -59,15 +59,16 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 
 ### M5 — Thiết bị & mạng ✅ (v0.7.0, trừ host Kermius)
 - ✅ USB/ổ chưa mount: click để mount; ⏏ eject/unmount (udisks2); thanh dung lượng từng ổ trong sidebar.
-- ✅ Connect to Server: SMB / SFTP / FTP / WebDAV qua gvfs (mật khẩu qua hộp thoại GTK + gnome-keyring); nhớ server đã dùng.
+- ✅ Connect to Server: SMB (chọn share khi chỉ nhập server) / SFTP / FTP / WebDAV qua gvfs (mật khẩu qua hộp thoại GTK + gnome-keyring); nhớ server đã dùng.
 - **Host SFTP từ Kermius** hiện trong sidebar — chờ Kermius thêm `hosts.list` (đã ghi vào spec).
 
-### M6 — Terminal, editor, AI
-- Kermius Control API: tab terminal riêng của Kolphin (icon Kolphin), tự `cd` theo folder (chỉ khi shell rảnh), đồng bộ ngược khi terminal `cd` (OSC 7), tự mở lại khi bị đóng.
-- Không có Kermius → terminal mặc định + dòng gợi ý cài Kermius.
-- **Custom Actions** (TOML, kiểu service menu Dolphin); có sẵn: Mở bằng VSCode, Claude, OpenCode (mở tab Kermius riêng), Share qua Kermius.
-- **Badge git status** trên file/folder.
-- **Command palette (Ctrl+K)** giống Kermius.
+### M6 — Terminal, editor, AI ✅ (v0.8.0)
+- ✅ Kermius Control API (F4): tab terminal riêng của Kolphin (icon Kolphin), tự `cd` theo folder (chỉ khi shell rảnh), đồng bộ ngược khi terminal `cd` (OSC 7), tự mở lại khi bị đóng.
+- ✅ Không có Kermius → terminal mặc định + dòng gợi ý cài Kermius.
+- ✅ **Custom Actions** (`~/.config/kolphin/actions.toml`, kiểu service menu Dolphin); có sẵn: Mở bằng VSCode, Claude, OpenCode (mở tab Kermius riêng), Share qua Kermius.
+- ✅ **Badge git status** trên file/folder.
+- ✅ **Command palette (Ctrl+K)** giống Kermius.
+- ✅ Trash trong sidebar (cả Trash trên ổ NTFS): Restore, Empty Trash.
 
 ### M7 — Drop Shelf
 - Lắc chuột khi đang kéo → hiện kệ thả tạm, thao tác rảnh tay rồi kéo ra sau. X11: theo dõi chuột toàn màn hình; Wayland: chỉ trong cửa sổ Kolphin + phím tắt.

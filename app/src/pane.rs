@@ -2,6 +2,7 @@
 use crate::canvas::{Action, Canvas, ViewMode};
 use crate::model::{self, Entry, Msg, UNKNOWN_SIZE};
 use crate::pathbar::PathBar;
+use crate::ops::is_trash as ops_trash;
 use crate::viewprops::{self, ViewProps};
 use gtk::{gio, glib, prelude::*};
 use std::cell::{Cell, RefCell};
@@ -580,11 +581,16 @@ impl Pane {
             }
             menu.append_section(None, &s);
         };
+        if ops_trash(&self.path()) {
+            section(&[("Restore", "win.restore"), ("Delete Permanently", "win.delete")]);
+            section(&[("Empty Trash", "win.empty-trash"), ("Quick Look (Space)", "win.quicklook")]);
+            return self.popup_menu(&menu, x, y);
+        }
         if on_item {
             section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook")]);
             section(&[("Cut", "win.cut"), ("Copy", "win.copy"), ("Paste", "win.paste"), ("Copy Path", "win.copy-path")]);
             section(&[("Rename… (F2)", "win.rename"), ("Move to Trash (Del)", "win.trash"), ("Delete Permanently", "win.delete")]);
-            section(&[("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink")]);
+            section(&[("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
             section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {
@@ -592,7 +598,19 @@ impl Pane {
             section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
             section(&[("Folder Statistics…", "win.stats"), ("Properties", "win.properties")]);
         }
-        let pop = gtk::PopoverMenu::from_model(Some(&menu));
+        let custom = gio::Menu::new();
+        custom.append(Some("Open Terminal Here (F4)"), Some("win.terminal"));
+        for (i, a) in crate::actions::load().iter().enumerate() {
+            let item = gio::MenuItem::new(Some(&a.name), None);
+            item.set_action_and_target_value(Some("win.custom-action"), Some(&(i as i32).to_variant()));
+            custom.append_item(&item);
+        }
+        menu.append_section(None, &custom);
+        self.popup_menu(&menu, x, y);
+    }
+
+    fn popup_menu(&self, menu: &gio::Menu, x: f64, y: f64) {
+        let pop = gtk::PopoverMenu::from_model(Some(menu));
         pop.set_parent(&self.canvas);
         pop.set_has_arrow(false);
         pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -689,10 +707,23 @@ impl Pane {
         });
         self.try_select_pending();
         self.read_dims();
+        self.refresh_git();
     }
 
     fn after_load(self: &Rc<Self>) {
         self.read_dims();
+        self.refresh_git();
+    }
+
+    /// Git badges for this folder, computed off the UI thread.
+    fn refresh_git(self: &Rc<Self>) {
+        let (dir, generation, weak) = (self.path(), self.generation.get(), Rc::downgrade(self));
+        glib::spawn_future_local(async move {
+            let map = gio::spawn_blocking(move || crate::git::status(&dir)).await.ok().flatten().unwrap_or_default();
+            if let Some(pane) = weak.upgrade().filter(|p| p.generation.get() == generation) {
+                pane.canvas.set_git(map);
+            }
+        });
     }
 }
 
