@@ -129,6 +129,13 @@ pub fn recent_servers() -> Vec<String> {
     settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
 }
 
+pub fn forget_server(uri: &str) {
+    let list: Vec<String> = recent_servers().into_iter().filter(|u| u != uri).collect();
+    let mut s = settings();
+    s["servers"] = list.into();
+    let _ = std::fs::write(settings_file(), s.to_string());
+}
+
 pub fn add_recent_server(uri: &str) {
     let mut list = recent_servers();
     list.retain(|u| u != uri);

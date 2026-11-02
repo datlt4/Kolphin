@@ -1,4 +1,5 @@
 mod actions;
+mod bookmarks;
 mod canvas;
 mod clipboard;
 mod devices;
@@ -51,7 +52,7 @@ const CSS: &str = "
 @define-color kolphin_hover #222632;
 @define-color kolphin_hover_strong #2c3243;
 
-window, .background { background: @window_bg_color; }
+window.background { background: @window_bg_color; }
 headerbar { box-shadow: inset 0 -1px @kolphin_border; min-height: 46px; }
 headerbar button { border-radius: 8px; }
 headerbar button:hover { background: @kolphin_hover_strong; color: #ffffff; box-shadow: inset 0 0 0 1px #3a4153; }

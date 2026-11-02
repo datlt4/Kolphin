@@ -587,14 +587,14 @@ impl Pane {
             return self.popup_menu(&menu, x, y);
         }
         if on_item {
-            section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook")]);
+            section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook"), ("Add to Bookmarks", "win.add-bookmark")]);
             section(&[("Cut", "win.cut"), ("Copy", "win.copy"), ("Paste", "win.paste"), ("Copy Path", "win.copy-path")]);
             section(&[("Rename… (F2)", "win.rename"), ("Move to Trash (Del)", "win.trash"), ("Delete Permanently", "win.delete")]);
             section(&[("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
             section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {
-            section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder"), ("Select All", "win.select-all")]);
+            section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder"), ("Select All", "win.select-all"), ("Bookmark This Folder", "win.add-bookmark")]);
             section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
             section(&[("Folder Statistics…", "win.stats"), ("Properties", "win.properties")]);
         }

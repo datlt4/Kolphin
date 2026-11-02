@@ -1,6 +1,7 @@
 //! Main window: places sidebar, tabs, split view, header bar and window actions.
 use crate::canvas::ViewMode;
 use crate::actions;
+use crate::bookmarks;
 use crate::clipboard;
 use crate::kermius;
 use crate::palette;
@@ -620,6 +621,15 @@ impl Win {
             }
         });
         self.window.add_action(&custom);
+        add("add-bookmark", |w| {
+            let mut dirs: Vec<PathBuf> = w.pane().selected_paths().into_iter().filter(|p| p.is_dir()).collect();
+            if dirs.is_empty() {
+                dirs.push(w.pane().path());
+            }
+            let n = bookmarks::add(&dirs);
+            w.fill_places();
+            w.toasts.add_toast(adw::Toast::new(&format!("Bookmarked {n} folder(s)")));
+        });
         add("make-symlink", |w| make_links(w, false));
         add("make-hardlink", |w| make_links(w, true));
         add("open-tab-selected", |w| w.pane().open_selected(true));
@@ -784,7 +794,7 @@ impl Win {
             let Some(win) = w.upgrade() else { return };
             let place = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
             match place {
-                Some(Place::Path(path)) => win.pane().navigate(path),
+                Some(Place::Path(path) | Place::Bookmark(path)) => win.pane().navigate(path),
                 Some(Place::Volume(vol)) => {
                     let weak = win.weak();
                     devices::mount_volume(win.window.upcast_ref(), vol, move |res| win_open(&weak, res, None));
@@ -801,6 +811,50 @@ impl Win {
                 None => {}
             }
         });
+        // Right click: remove a bookmark / forget a server.
+        let menu = gtk::GestureClick::builder().button(3).build();
+        let w = self.weak();
+        menu.connect_pressed(move |_, _, _, y| {
+            let Some(win) = w.upgrade() else { return };
+            let Some(row) = win.places.row_at_y(y as i32) else { return };
+            let place = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
+            let weak = win.weak();
+            match place {
+                Some(Place::Bookmark(p)) => {
+                    let text = format!("Remove the bookmark for {}?", p.display());
+                    dialogs::confirm(win.window.upcast_ref(), "Remove Bookmark", &text, "Remove", move || {
+                        bookmarks::remove(&p);
+                        if let Some(w) = weak.upgrade() {
+                            w.fill_places();
+                        }
+                    });
+                }
+                Some(Place::Server(uri)) => {
+                    let text = format!("Forget {uri}? Saved passwords stay in the keyring.");
+                    dialogs::confirm(win.window.upcast_ref(), "Forget Server", &text, "Forget", move || {
+                        viewprops::forget_server(&uri);
+                        if let Some(w) = weak.upgrade() {
+                            w.fill_places();
+                        }
+                    });
+                }
+                _ => {}
+            }
+        });
+        self.places.add_controller(menu);
+        // Drop folders on the sidebar to bookmark them.
+        let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::LINK);
+        let w = self.weak();
+        drop.connect_drop(move |_, value, _, _| {
+            let (Some(win), Ok(list)) = (w.upgrade(), value.get::<gtk::gdk::FileList>()) else { return false };
+            let dirs: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).filter(|p| p.is_dir()).collect();
+            let n = bookmarks::add(&dirs);
+            win.fill_places();
+            win.toasts.add_toast(adw::Toast::new(&if n > 0 { format!("Bookmarked {n} folder(s)") } else { "Only folders can be bookmarked".to_string() }));
+            n > 0
+        });
+        self.places.add_controller(drop);
+
         let monitor = gio::VolumeMonitor::get();
         let w = self.weak();
         let refresh = move || {
@@ -892,6 +946,19 @@ impl Win {
             }
         }
 
+        title("BOOKMARKS");
+        let marks = bookmarks::load();
+        let builtin: Vec<PathBuf> = places.borrow().iter().flatten().filter_map(|p| if let Place::Path(p) = p { Some(p.clone()) } else { None }).collect();
+        let marks: Vec<_> = marks.into_iter().filter(|(p, _)| !builtin.contains(p)).collect();
+        if marks.is_empty() {
+            let hint = gtk::Label::builder().label("Drag folders here").xalign(0.0).css_classes(["dim-label"]).build();
+            self.places.append(&gtk::ListBoxRow::builder().child(&hint).selectable(false).activatable(false).build());
+            places.borrow_mut().push(None);
+        }
+        for (path, label) in marks {
+            add(themed("folder-symbolic"), &label, Place::Bookmark(path), None, None);
+        }
+
         // Trash: the home one always, plus non-empty trashes on other volumes (NTFS drives keep their own).
         let monitor = gio::VolumeMonitor::get();
         let tops: Vec<(PathBuf, String)> = monitor.mounts().iter().filter_map(|m| Some((m.root().path()?, m.name().to_string()))).collect();
@@ -941,7 +1008,7 @@ impl Win {
         // gvfs lower-cases share names in its URIs, so compare without case.
         let shown: Vec<String> = shown.iter().map(|s| s.to_lowercase()).collect();
         for uri in viewprops::recent_servers().into_iter().filter(|u| !shown.iter().any(|s| s.starts_with(&u.trim_end_matches('/').to_lowercase()))) {
-            add(themed("network-server-symbolic"), &uri, Place::Server(uri.clone()), None, None);
+            add(themed("network-server-symbolic"), &devices::server_label(&uri), Place::Server(uri.clone()), None, None);
         }
         add(themed("list-add-symbolic"), "Connect to Server…", Place::Connect, None, None);
         *self.place_paths.borrow_mut() = places.into_inner();
@@ -952,6 +1019,7 @@ impl Win {
 #[derive(Clone)]
 enum Place {
     Path(PathBuf),
+    Bookmark(PathBuf),
     Volume(gio::Volume),
     Server(String),
     Connect,

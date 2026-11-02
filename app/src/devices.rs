@@ -19,8 +19,15 @@ pub fn ejectable(m: &gio::Mount) -> bool {
     m.can_eject() || m.volume().is_some_and(|v| v.can_eject()) || m.drive().is_some_and(|d| d.is_removable()) || (m.volume().is_none() && m.can_unmount())
 }
 
-pub fn mount_volume(parent: &gtk::Window, vol: gio::Volume, done: impl FnOnce(Result<PathBuf, String>) + 'static) {
+/// A password prompt that defaults to "Remember forever" (the keyring), so shares don't ask again.
+fn mount_op(parent: &gtk::Window) -> gtk::MountOperation {
     let op = gtk::MountOperation::new(Some(parent));
+    op.set_password_save(gio::PasswordSave::Permanently);
+    op
+}
+
+pub fn mount_volume(parent: &gtk::Window, vol: gio::Volume, done: impl FnOnce(Result<PathBuf, String>) + 'static) {
+    let op = mount_op(parent);
     let v = vol.clone();
     vol.mount(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |res| {
         done(res.map_err(|e| e.to_string()).and_then(|_| v.get_mount().and_then(|m| m.root().path()).ok_or_else(|| "mounted, but has no local path".into())));
@@ -44,6 +51,17 @@ pub enum Connected {
     Shares(Vec<(String, String)>),
 }
 
+/// "HDD-1TB on 192.168.0.186" for smb://192.168.0.186/HDD-1TB; other URIs as they are.
+pub fn server_label(uri: &str) -> String {
+    match uri.split_once("://").map(|(_, r)| r.trim_end_matches('/')) {
+        Some(rest) => match rest.split_once('/') {
+            Some((host, path)) if !path.is_empty() => format!("{} on {}", path.rsplit('/').next().unwrap_or(path), host.rsplit('@').next().unwrap_or(host)),
+            _ => rest.to_string(),
+        },
+        None => uri.to_string(),
+    }
+}
+
 /// `smb://host:445/x` → `smb://host/x` (445 is SMB's default port; gvfs treats an explicit one as another server).
 pub fn normalize(uri: &str) -> String {
     let uri = uri.trim();
@@ -59,7 +77,7 @@ pub fn normalize(uri: &str) -> String {
 /// Mount `smb://`, `sftp://`, `ftp://`, `dav://` … through gvfs; passwords go through GTK's dialog and the keyring.
 pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<Connected, String>) + 'static) {
     let file = gio::File::for_uri(&normalize(uri));
-    let op = gtk::MountOperation::new(Some(parent));
+    let op = mount_op(parent);
     let f = file.clone();
     file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |res| {
         match res {
@@ -103,6 +121,13 @@ pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<Connect
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn labels() {
+        assert_eq!(super::server_label("smb://192.168.0.186/HDD-1TB"), "HDD-1TB on 192.168.0.186");
+        assert_eq!(super::server_label("sftp://koi@host/home/koi/"), "koi on host");
+        assert_eq!(super::server_label("smb://nas/"), "nas");
+    }
+
     #[test]
     fn normalizes_smb() {
         assert_eq!(super::normalize("smb://192.168.0.186:445"), "smb://192.168.0.186/");
