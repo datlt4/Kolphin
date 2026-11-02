@@ -123,3 +123,20 @@ pub fn set_custom_icon(paths: &[PathBuf], icon: Option<&str>) {
         let _ = std::fs::write(path, json);
     }
 }
+
+/// Servers connected to before, newest first.
+pub fn recent_servers() -> Vec<String> {
+    settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
+}
+
+pub fn add_recent_server(uri: &str) {
+    let mut list = recent_servers();
+    list.retain(|u| u != uri);
+    list.insert(0, uri.to_string());
+    list.truncate(8);
+    let mut s = settings();
+    s["servers"] = list.into();
+    let path = settings_file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(path, s.to_string());
+}

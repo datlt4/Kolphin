@@ -57,10 +57,10 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - ✅ **Quick Look (Space)**: ảnh, khung hình video, text; ←/→ chuyển file. Còn: phát video (cần libgtk-4-media-gstreamer).
 - **Mở file nén như folder** (zip/tar), menu nén/giải nén.
 
-### M5 — Thiết bị & mạng
-- USB: hiện, unmount, safe-remove (udisks2); thanh dung lượng từng ổ trong sidebar.
-- SMB + SFTP qua gvfs (mật khẩu lưu gnome-keyring).
-- **Host SFTP từ Kermius** hiện trong sidebar.
+### M5 — Thiết bị & mạng ✅ (v0.7.0, trừ host Kermius)
+- ✅ USB/ổ chưa mount: click để mount; ⏏ eject/unmount (udisks2); thanh dung lượng từng ổ trong sidebar.
+- ✅ Connect to Server: SMB / SFTP / FTP / WebDAV qua gvfs (mật khẩu qua hộp thoại GTK + gnome-keyring); nhớ server đã dùng.
+- **Host SFTP từ Kermius** hiện trong sidebar — chờ Kermius thêm `hosts.list` (đã ghi vào spec).
 
 ### M6 — Terminal, editor, AI
 - Kermius Control API: tab terminal riêng của Kolphin (icon Kolphin), tự `cd` theo folder (chỉ khi shell rảnh), đồng bộ ngược khi terminal `cd` (OSC 7), tự mở lại khi bị đóng.

@@ -102,6 +102,14 @@ Result: `{"sessions": [{"session": "<uuid>", "key": "kolphin-main", "cwd": "/hom
 ### `share`
 Params: `{"paths": ["/abs/a.png", "/abs/dir"]}` — same behaviour as `kermius --share`. Result `{}`.
 
+### `hosts.list` (v1.1, requested by Kolphin M5)
+Params: `{}`
+Result: `{"hosts": [{"id": "<uuid>", "name": "Orin4-wg", "group": "Vizgard", "protocol": "ssh", "user": "aiserver", "host": "10.0.0.4", "port": 22}]}`
+- SSH hosts only; never include passwords or keys.
+- Kolphin shows them under NETWORK and opens `sftp://user@host:port/` through gvfs; authentication is the user's
+  ssh-agent / keys, not Kermius secrets.
+- Event `hosts.changed` (no params) when the list changes, so the sidebar can refresh.
+
 ## Events
 
 Sent to every connected client that called `hello`.

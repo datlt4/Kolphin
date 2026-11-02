@@ -1,6 +1,7 @@
 //! Main window: places sidebar, tabs, split view, header bar and window actions.
 use crate::canvas::ViewMode;
 use crate::clipboard;
+use crate::devices;
 use crate::dialogs;
 use crate::ops;
 use crate::props;
@@ -40,7 +41,7 @@ pub struct Win {
     main_col: gtk::Box,
     view_button: gtk::MenuButton,
     places: gtk::ListBox,
-    place_paths: RefCell<Vec<Option<PathBuf>>>,
+    place_paths: RefCell<Vec<Option<Place>>>,
 }
 
 thread_local! {
@@ -123,6 +124,7 @@ impl Win {
         menu.append(Some("Select by Pattern…"), Some("win.select-pattern"));
         menu.append(Some("Random Sample…"), Some("win.random-sample"));
         menu.append(Some("Folder Statistics…"), Some("win.stats"));
+        menu.append(Some("Connect to Server…"), Some("win.connect-server"));
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
@@ -522,6 +524,14 @@ impl Win {
                 }
             });
         });
+        add("connect-server", |w| {
+            let weak = w.weak();
+            dialogs::prompt(w.window.upcast_ref(), "Connect to Server", "Address, e.g. smb://nas.local/share, sftp://user@host/path, ftp://host", "smb://", move |uri| {
+                if let Some(win) = weak.upgrade() {
+                    win.connect_server(uri);
+                }
+            });
+        });
         add("make-symlink", |w| make_links(w, false));
         add("make-hardlink", |w| make_links(w, true));
         add("open-tab-selected", |w| w.pane().open_selected(true));
@@ -684,9 +694,23 @@ impl Win {
         let w = self.weak();
         self.places.connect_row_activated(move |_, row| {
             let Some(win) = w.upgrade() else { return };
-            let path = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
-            if let Some(path) = path {
-                win.pane().navigate(path);
+            let place = win.place_paths.borrow().get(row.index() as usize).cloned().flatten();
+            match place {
+                Some(Place::Path(path)) => win.pane().navigate(path),
+                Some(Place::Volume(vol)) => {
+                    let weak = win.weak();
+                    devices::mount_volume(win.window.upcast_ref(), vol, move |res| win_open(&weak, res, None));
+                }
+                Some(Place::Server(uri)) => win.connect_server(uri),
+                Some(Place::Connect) => {
+                    let weak = win.weak();
+                    dialogs::prompt(win.window.upcast_ref(), "Connect to Server", "Address, e.g. smb://nas.local/share, sftp://user@host/path, ftp://host", "smb://", move |uri| {
+                        if let Some(win) = weak.upgrade() {
+                            win.connect_server(uri);
+                        }
+                    });
+                }
+                None => {}
             }
         });
         let monitor = gio::VolumeMonitor::get();
@@ -698,30 +722,61 @@ impl Win {
         };
         monitor.connect_mount_added(glib::clone!(#[strong] refresh, move |_, _| refresh()));
         monitor.connect_mount_removed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
-        monitor.connect_mount_changed(move |_, _| refresh());
+        monitor.connect_mount_changed(glib::clone!(#[strong] refresh, move |_, _| refresh()));
+        monitor.connect_volume_added(glib::clone!(#[strong] refresh, move |_, _| refresh()));
+        monitor.connect_volume_removed(move |_, _| refresh());
         self.fill_places();
     }
 
-    fn fill_places(&self) {
+    fn connect_server(self: &Rc<Self>, uri: String) {
+        let weak = self.weak();
+        let u = uri.clone();
+        self.toasts.add_toast(adw::Toast::new(&format!("Connecting to {uri}…")));
+        devices::connect(self.window.upcast_ref(), &uri, move |res| win_open(&weak, res, Some(u)));
+    }
+
+    fn fill_places(self: &Rc<Self>) {
         while let Some(row) = self.places.row_at_index(0) {
             self.places.remove(&row);
         }
-        let paths = RefCell::new(Vec::new());
+        let places = RefCell::new(Vec::new());
         let title = |text: &str| {
             let label = gtk::Label::builder().label(text).xalign(0.0).build();
             self.places.append(&gtk::ListBoxRow::builder().child(&label).selectable(false).activatable(false).css_classes(["side-title"]).build());
-            paths.borrow_mut().push(None);
+            places.borrow_mut().push(None);
         };
-        let add = |icon: gio::Icon, label: &str, path: PathBuf| {
-            let row = gtk::Box::builder().spacing(11).build();
-            row.append(&gtk::Image::from_gicon(&icon));
-            row.append(&gtk::Label::builder().label(label).ellipsize(gtk::pango::EllipsizeMode::End).build());
+        // A row: icon + name (+ eject), and for mounted local drives a free-space bar.
+        let add = |icon: gio::Icon, label: &str, place: Place, usage: Option<(u64, u64)>, eject: Option<gio::Mount>| {
+            let line = gtk::Box::builder().spacing(11).build();
+            line.append(&gtk::Image::from_gicon(&icon));
+            line.append(&gtk::Label::builder().label(label).ellipsize(gtk::pango::EllipsizeMode::End).hexpand(true).xalign(0.0).build());
+            if let Some(m) = eject {
+                let b = gtk::Button::builder().icon_name("media-eject-symbolic").css_classes(["flat", "eject"]).tooltip_text("Eject / unmount").build();
+                let weak = self.weak();
+                b.connect_clicked(move |_| {
+                    let Some(win) = weak.upgrade() else { return };
+                    let w2 = win.weak();
+                    devices::eject(win.window.upcast_ref(), m.clone(), move |res| {
+                        if let (Some(win), Err(e)) = (w2.upgrade(), res) {
+                            win.toasts.add_toast(adw::Toast::new(&format!("Eject failed: {e}")));
+                        }
+                    });
+                });
+                line.append(&b);
+            }
+            let row = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
+            row.append(&line);
+            if let Some((free, size)) = usage {
+                let bar = gtk::LevelBar::builder().min_value(0.0).max_value(1.0).value(1.0 - free as f64 / size as f64).css_classes(["usage"]).build();
+                bar.set_tooltip_text(Some(&format!("{} free of {}", glib::format_size(free), glib::format_size(size))));
+                row.append(&bar);
+            }
             self.places.append(&row);
-            paths.borrow_mut().push(Some(path));
+            places.borrow_mut().push(Some(place));
         };
         title("PLACES");
         let themed = |name: &str| gio::ThemedIcon::new(name).upcast::<gio::Icon>();
-        add(themed("user-home-symbolic"), "Home", glib::home_dir());
+        add(themed("user-home-symbolic"), "Home", Place::Path(glib::home_dir()), None, None);
         for (dir, icon) in [
             (glib::UserDirectory::Desktop, "user-desktop-symbolic"),
             (glib::UserDirectory::Documents, "folder-documents-symbolic"),
@@ -731,18 +786,70 @@ impl Win {
             (glib::UserDirectory::Music, "folder-music-symbolic"),
         ] {
             if let Some(p) = glib::user_special_dir(dir).filter(|p| p.is_dir() && *p != glib::home_dir()) {
-                add(themed(icon), &folder_name(&p), p);
+                add(themed(icon), &folder_name(&p), Place::Path(p), None, None);
             }
         }
+
         title("DEVICES");
-        add(themed("drive-harddisk-symbolic"), "Root", PathBuf::from("/"));
-        for mount in gio::VolumeMonitor::get().mounts() {
-            if let Some(path) = mount.root().path() {
-                add(mount.symbolic_icon(), &mount.name(), path);
+        add(themed("drive-harddisk-symbolic"), "Root", Place::Path(PathBuf::from("/")), devices::usage(std::path::Path::new("/")), None);
+        let monitor = gio::VolumeMonitor::get();
+        let mut network = Vec::new();
+        for m in monitor.mounts() {
+            let Some(path) = m.root().path() else { continue };
+            if devices::is_remote(&path) {
+                network.push(m);
+                continue;
+            }
+            let eject = devices::ejectable(&m).then(|| m.clone());
+            add(m.symbolic_icon(), &m.name(), Place::Path(path.clone()), devices::usage(&path), eject);
+        }
+        // Plugged in but not mounted yet (USB sticks, other partitions): click to mount.
+        for v in monitor.volumes() {
+            if v.get_mount().is_none() && v.can_mount() {
+                add(v.symbolic_icon(), &v.name(), Place::Volume(v.clone()), None, None);
             }
         }
-        *self.place_paths.borrow_mut() = paths.into_inner();
+
+        title("NETWORK");
+        let mut shown = Vec::new();
+        for m in network {
+            let uri = m.root().uri().to_string();
+            if let Some(path) = m.root().path() {
+                shown.push(uri);
+                add(m.symbolic_icon(), &m.name(), Place::Path(path), None, Some(m.clone()));
+            }
+        }
+        for uri in viewprops::recent_servers().into_iter().filter(|u| !shown.iter().any(|s| s.starts_with(u.trim_end_matches('/')))) {
+            add(themed("network-server-symbolic"), &uri, Place::Server(uri.clone()), None, None);
+        }
+        add(themed("list-add-symbolic"), "Connect to Server…", Place::Connect, None, None);
+        *self.place_paths.borrow_mut() = places.into_inner();
     }
+}
+
+/// A sidebar entry and what clicking it does.
+#[derive(Clone)]
+enum Place {
+    Path(PathBuf),
+    Volume(gio::Volume),
+    Server(String),
+    Connect,
+}
+
+/// After mounting: open the result in the active view (and remember a server), or report the error.
+fn win_open(weak: &Weak<Win>, res: Result<PathBuf, String>, server: Option<String>) {
+    let Some(win) = weak.upgrade() else { return };
+    match res {
+        Ok(path) => {
+            if let Some(uri) = server {
+                viewprops::add_recent_server(&uri);
+            }
+            win.pane().navigate(path);
+            win.fill_places();
+        }
+        Err(e) => win.toasts.add_toast(adw::Toast::new(&format!("Could not open: {e}"))),
+    }
+
 }
 
 fn make_links(w: &Rc<Win>, hard: bool) {

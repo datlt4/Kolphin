@@ -1,5 +1,6 @@
 mod canvas;
 mod clipboard;
+mod devices;
 mod dialogs;
 mod icons;
 mod model;
@@ -65,6 +66,11 @@ headerbar { background: @kolphin_side; }
 .places row:selected { background: alpha(@accent_color, 0.14); color: #ffffff; }
 .places row:selected image { color: @accent_color; }
 .places row.side-title, .places row.side-title:hover { background: none; padding: 16px 11px 6px; font-size: 11px; font-weight: 600; letter-spacing: 1px; color: @kolphin_faint; }
+.places levelbar.usage { margin: 0 2px 2px 29px; }
+.places levelbar.usage trough { min-height: 3px; border-radius: 99px; background: @kolphin_elev; }
+.places levelbar.usage block.filled { min-height: 3px; border-radius: 99px; background: @accent_color; }
+.places levelbar.usage block.empty { background: none; }
+.places button.eject { min-height: 22px; min-width: 22px; padding: 0; margin: -4px -6px -4px 0; }
 .side-foot { color: @kolphin_faint; font-size: 11.5px; padding: 10px 21px; border-top: 1px solid @kolphin_border; }
 paned > separator { min-width: 1px; min-height: 1px; margin: 0; padding: 0; background: @kolphin_border; background-image: none; box-shadow: none; }
 headerbar .linked > button:not(:checked):not(:hover) { background: none; box-shadow: none; }
