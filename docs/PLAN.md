@@ -7,7 +7,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - UI: GTK4 (gtk4-rs) + libadwaita, baseline GTK 4.6 / adw 1.1 (Ubuntu 22.04). Vùng hiển thị file là **canvas tự vẽ** (giống `KItemListView` của Dolphin): chỉ vẽ item trên màn hình.
 - Linux trước (x86_64 + aarch64). Windows/macOS sau: lõi không phụ thuộc GUI, lớp platform tách riêng.
 - Cài đặt hiển thị từng folder lưu tập trung ở `~/.local/share/kolphin/`, không ghi vào folder đang duyệt.
-- Đóng gói `.deb` + `.tar.gz` (AppImage sau). Không Flatpak (sandbox cản terminal/USB/claude).
+- Đóng gói `.deb` + `.tar.gz` + AppImage (v0.16.0). Không Flatpak (sandbox cản terminal/USB/claude).
 - Kermius: không sửa từ repo này; nhu cầu mới → cập nhật [kermius-control-api.md](kermius-control-api.md).
 - Icon file/folder: [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT), vendored ở `assets/material-icons/`, cập nhật bằng `tools/fetch-material-icons.sh`.
 
@@ -46,10 +46,10 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - ✅ Thống kê thư mục: số file theo đuôi, histogram dung lượng; dung lượng folder đệ quy (nền, huỷ được).
 - ✅ Đổi icon cho file/folder bằng cách chọn trong bộ Material; menu chuột phải; hiện full tên khi chọn.
 
-### M4 — Thao tác file (phần lớn ✅ v0.6.0)
+### M4 — Thao tác file ✅
 - ✅ Cut/Copy/Paste cơ bản (clipboard chung với Nautilus).
 - ✅ Tạo symlink / hardlink; emblem symlink kiểu Ubuntu.
-- ✅ Hàng đợi copy/move chạy tuần tự, có % và tốc độ, nút Cancel (xoá phần copy dở); trùng tên hỏi Replace (cũ vào Trash) / Skip / Keep Both. Còn: pause/resume, kiểm tra lại bằng xxHash sau copy.
+- ✅ Hàng đợi copy/move chạy tuần tự, có % và tốc độ, nút Cancel (xoá phần copy dở); trùng tên hỏi Replace (cũ vào Trash) / Skip / Keep Both. ✅ (v0.16.0) Pause/Resume; tuỳ chọn Verify Copies (xxHash, đọc lại từ đĩa).
 - ✅ Trash/xoá/đổi tên (F2), folder mới, **Ctrl+Z undo** (rename, move, copy, trash, link), đổi tên hàng loạt có xem trước (regex, `{n}`).
 - ✅ Kéo thả vào/ra app khác (cùng ổ = move, khác ổ = copy; Shift/Ctrl để ép).
 - ✅ "Mở bằng…" + đặt app mặc định.
@@ -79,7 +79,9 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - Còn: backend portal FileChooser (app Snap/Flatpak/Chrome/Qt dùng portal; app GTK3 native không thay được).
 - ✅ **Khôi phục phiên**: tabs + split view mở lại như lúc thoát.
 - ✅ **Tìm kiếm song song** trong thư mục con (Ctrl+F), kết quả hiện dần.
-- ✅ Tuỳ chọn tắt tự kiểm tra update. Còn: AppImage.
+- ✅ Tuỳ chọn tắt tự kiểm tra update.
+- ✅ (v0.16.0) AppImage x86_64/aarch64 (GTK4 + libadwaita đóng gói sẵn), tự cập nhật bằng cách thay file AppImage.
+- ✅ (v0.15.0) PDF: Convert to PDF, Merge into PDF theo thứ tự chọn. New File / New Document (docx, xlsx, pptx, odt, ods, odp, ~/Templates). Compress chọn định dạng.
 
 ### Sau Linux
 - Windows / macOS: lớp platform riêng (GIO/gvfs yếu ở đó), đóng gói `.msi` / `.app`.
