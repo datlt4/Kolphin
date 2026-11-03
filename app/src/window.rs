@@ -447,6 +447,26 @@ impl Win {
                 clipboard::run_transfer(&win.toasts, files, dir, cut);
             }
         })));
+        *pane.on_denied.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |path| {
+            let Some(win) = w.upgrade() else { return };
+            let weak = win.weak();
+            let toast = notify::Toast::builder()
+                .title("The share refused access: its password may have changed.")
+                .timeout(0)
+                .on_button("Sign in again", move |_| {
+                    let Some(win) = weak.upgrade() else { return };
+                    let w2 = win.weak();
+                    devices::reconnect(path.clone(), move |res| {
+                        let Some(win) = w2.upgrade() else { return };
+                        match res {
+                            Ok(uri) => win.connect_server(uri),
+                            Err(e) => win.toasts.add_toast(notify::Toast::new(&format!("Sign in again failed: {e}"))),
+                        }
+                    });
+                })
+                .build();
+            win.toasts.add_toast(toast);
+        })));
         *pane.on_open_tab.borrow_mut() = Some(Box::new(glib::clone!(#[strong] w, move |path| {
             if let Some(win) = w.upgrade() {
                 win.add_tab_background(path);

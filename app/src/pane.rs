@@ -57,6 +57,8 @@ pub struct Pane {
     pub on_open_tab: PathCallback,
     /// Files dropped in: (sources, destination folder, move?).
     pub on_drop: DropCallback,
+    /// A network share refused access (its saved password is likely stale).
+    pub on_denied: PathCallback,
 }
 
 impl Pane {
@@ -137,6 +139,7 @@ impl Pane {
             changes: Default::default(),
             pending_select: Default::default(),
             on_navigated: Default::default(),
+            on_denied: Default::default(),
             on_view: Default::default(),
             on_focus: Default::default(),
             on_open_tab: Default::default(),
@@ -627,6 +630,12 @@ impl Pane {
                     Msg::Error(e) => {
                         pane.loading.set(false);
                         pane.status.set_text(&e);
+                        let path = pane.path();
+                        if e.contains("os error 13") && crate::devices::is_remote(&path) {
+                            if let Some(f) = pane.on_denied.borrow().as_ref() {
+                                f(path);
+                            }
+                        }
                     }
                 }
             }

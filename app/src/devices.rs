@@ -40,6 +40,21 @@ pub fn forget_password(uri: &str) {
     }
 }
 
+/// Drop the share mounted at `path` and its saved password; `done` gets the share's address to connect to again
+/// (which then asks for the password).
+pub fn reconnect(path: PathBuf, done: impl FnOnce(Result<String, String>) + 'static) {
+    let mount = gio::VolumeMonitor::get().mounts().into_iter().find(|m| m.root().path().is_some_and(|r| path.starts_with(r)));
+    let Some(mount) = mount else { return done(Err("the share is not mounted".into())) };
+    let uri = mount.root().uri().to_string();
+    mount.unmount_with_operation(gio::MountUnmountFlags::FORCE, None::<&gio::MountOperation>, None::<&gio::Cancellable>, move |res| match res {
+        Ok(()) => {
+            forget_password(&uri);
+            done(Ok(uri));
+        }
+        Err(e) => done(Err(e.to_string())),
+    });
+}
+
 fn mount_op(parent: &gtk::Window) -> gtk::MountOperation {
     let op = gtk::MountOperation::new(Some(parent));
     op.set_password_save(gio::PasswordSave::Permanently);
