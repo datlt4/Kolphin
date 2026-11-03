@@ -116,6 +116,9 @@ impl ToastBuilder {
             let b = gtk::Button::builder().label(&text).css_classes(["suggested-action"]).build();
             b.set_action_name(action.as_deref());
             b.set_action_target_value(target.as_ref());
+            // Done once clicked: the toast goes away so it can't be clicked twice.
+            let r = root.clone();
+            b.connect_clicked(move |_| remove(&r));
             root.append(&b);
         }
         if let Some((text, f)) = self.on_button {
