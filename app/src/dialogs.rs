@@ -2,6 +2,11 @@
 use crate::icons;
 use gtk::{glib, prelude::*};
 
+/// The input method sending `text` at `pos` repeats the word it inserted `elapsed` ago, ending at `end`.
+fn ime_repeat(prev: &str, end: i32, elapsed: std::time::Duration, text: &str, pos: i32) -> bool {
+    prev == text && end == pos && elapsed < std::time::Duration::from_millis(100) && (!text.is_ascii() || text.chars().count() > 1)
+}
+
 /// Work around GTK 4.6 + input method (Unikey via ibus or XIM) bugs: the first letter typed over a selection lands
 /// at the end ("abc" → "bc a"), and Enter commits the pending word twice.
 pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
@@ -16,6 +21,18 @@ pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
     }
     // Committed text lands in the field; some input methods never report the emptied preedit.
     entry.connect_changed(glib::clone!(#[strong] composing, move |_| composing.set(false)));
+    // Whatever path makes the input method send a word twice (as Kermius found with xterm.js), drop a repeat of
+    // the same word right after it within 100 ms. Plain ASCII letters are left alone: "ll" can be typed that fast.
+    if let Some(t) = entry.delegate().and_downcast::<gtk::Text>() {
+        let last: std::rc::Rc<std::cell::RefCell<Option<(String, i32, std::time::Instant)>>> = Default::default();
+        t.connect_insert_text(move |t, text, pos| {
+            if last.borrow().as_ref().is_some_and(|(prev, end, at)| ime_repeat(prev, *end, at.elapsed(), text, *pos)) {
+                t.stop_signal_emission_by_name("insert-text");
+                return;
+            }
+            *last.borrow_mut() = Some((text.to_string(), *pos + text.chars().count() as i32, std::time::Instant::now()));
+        });
+    }
     keys.connect_key_pressed(move |_, key, _, state| {
         // Enter: the input method commits its pending word once on focus-out; the key itself would commit it a
         // second time ("abc" → "abcabc"). Keep Enter from it, let focus-out commit, then activate.
@@ -366,5 +383,20 @@ mod tests {
         assert_eq!(super::batch_names(&paths, r"^(.*)\.jpeg$", "$1.jpg").unwrap(), ["a.jpg", "b.jpg", "c.png"]);
         assert_eq!(super::batch_names(&paths, "", "img_{n}").unwrap(), ["img_1", "img_2", "img_3"]);
         assert!(super::batch_names(&paths, "(", "x").is_err());
+    }
+
+    #[test]
+    fn drops_only_quick_word_repeats() {
+        use super::ime_repeat;
+        use std::time::Duration;
+        let quick = Duration::from_millis(20);
+        assert!(ime_repeat("fủ", 2, quick, "fủ", 2));
+        assert!(ime_repeat("abc", 3, quick, "abc", 3));
+        // Typing "ll" fast is real.
+        assert!(!ime_repeat("l", 3, quick, "l", 3));
+        assert!(!ime_repeat("fủ", 2, Duration::from_millis(300), "fủ", 2));
+        // Elsewhere in the text, or another word.
+        assert!(!ime_repeat("fủ", 2, quick, "fủ", 0));
+        assert!(!ime_repeat("fủ", 2, quick, "là", 2));
     }
 }
