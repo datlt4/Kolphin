@@ -281,7 +281,7 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_tree(from, to, &mut |_| true)?;
+    copy_tree(from, to, false, &mut |_, _| true)?;
     if from.is_dir() && !from.is_symlink() {
         std::fs::remove_dir_all(from)
     } else {
@@ -293,6 +293,11 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 
 pub struct Progress {
     pub done_bytes: u64,
+    /// Bytes read back so far when copies are verified.
+    pub verified_bytes: u64,
+    /// Copies are verified (the work is twice the bytes), and that is happening right now.
+    pub verify: bool,
+    pub verifying: bool,
     pub total_bytes: u64,
     pub done_items: usize,
     pub total_items: usize,
@@ -314,18 +319,37 @@ pub fn conflicts(sources: &[PathBuf], dest: &Path) -> usize {
     sources.iter().filter(|s| s.parent() != Some(dest) && s.file_name().is_some_and(|n| std::fs::symlink_metadata(dest.join(n)).is_ok())).count()
 }
 
+/// Steers a running transfer from the UI.
+#[derive(Default)]
+pub struct Control {
+    pub cancel: AtomicBool,
+    pub pause: AtomicBool,
+    /// Read every copied file back from disk and compare its xxHash with the source's.
+    pub verify: AtomicBool,
+}
+
+impl Control {
+    /// Wait while paused; false once cancelled.
+    fn proceed(&self) -> bool {
+        while self.pause.load(Ordering::Relaxed) && !self.cancel.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !self.cancel.load(Ordering::Relaxed)
+    }
+}
+
 struct Job {
     sources: Vec<PathBuf>,
     dest: PathBuf,
     cut: bool,
     policy: Conflict,
-    cancel: Arc<AtomicBool>,
+    ctl: Arc<Control>,
     tx: async_channel::Sender<Progress>,
 }
 
 /// Copy or move into `dest`; jobs run one at a time (no two big copies fighting over a disk). Setting `cancel`
 /// stops it, removing the partly copied item.
-pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: Conflict, cancel: Arc<AtomicBool>) -> async_channel::Receiver<Progress> {
+pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: Conflict, ctl: Arc<Control>) -> async_channel::Receiver<Progress> {
     static QUEUE: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
     let queue = QUEUE.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
@@ -337,7 +361,7 @@ pub fn transfer(sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: Conflic
         tx
     });
     let (tx, rx) = async_channel::unbounded();
-    let _ = queue.send(Job { sources, dest, cut, policy, cancel, tx });
+    let _ = queue.send(Job { sources, dest, cut, policy, ctl, tx });
     rx
 }
 
@@ -352,7 +376,8 @@ fn tree_size(p: &Path) -> u64 {
 
 fn run(job: Job) {
     let total_items = job.sources.len();
-    let mut p = Progress { done_bytes: 0, total_bytes: 0, done_items: 0, total_items, finished: None };
+    let verify = job.ctl.verify.load(Ordering::Relaxed);
+    let mut p = Progress { done_bytes: 0, verified_bytes: 0, verify, verifying: false, total_bytes: 0, done_items: 0, total_items, finished: None };
     let result = (|| -> Result<Undo, String> {
         for src in &job.sources {
             if job.dest.starts_with(src) {
@@ -364,7 +389,7 @@ fn run(job: Job) {
         let (mut created, mut moved) = (Vec::new(), Vec::new());
         let mut last = Instant::now();
         for src in &job.sources {
-            if job.cancel.load(Ordering::Relaxed) {
+            if !job.ctl.proceed() {
                 return Err("Cancelled".into());
             }
             let name = src.file_name().ok_or("bad path")?;
@@ -391,16 +416,18 @@ fn run(job: Job) {
             if !renamed {
                 let tx = &job.tx;
                 let (total_bytes, done_items) = (p.total_bytes, p.done_items);
-                let mut done_bytes = p.done_bytes;
-                let cancel = &job.cancel;
-                let copied = copy_tree(src, &target, &mut |n| {
+                let (mut done_bytes, mut verified_bytes) = (p.done_bytes, p.verified_bytes);
+                let ctl = &job.ctl;
+                let copied = copy_tree(src, &target, verify, &mut |n, verified| {
                     done_bytes += n;
-                    if cancel.load(Ordering::Relaxed) {
+                    verified_bytes += verified;
+                    let verifying = verified > 0;
+                    if !ctl.proceed() {
                         return false;
                     }
                     if last.elapsed() > Duration::from_millis(150) {
                         last = Instant::now();
-                        let msg = Progress { done_bytes, total_bytes, done_items, total_items, finished: None };
+                        let msg = Progress { done_bytes, verified_bytes, verify, verifying, total_bytes, done_items, total_items, finished: None };
                         return tx.send_blocking(msg).is_ok();
                     }
                     true
@@ -408,9 +435,10 @@ fn run(job: Job) {
                 if let Err(e) = copied {
                     // Leave no half-copied item behind.
                     let _ = if target.is_dir() && !target.is_symlink() { std::fs::remove_dir_all(&target) } else { std::fs::remove_file(&target) };
-                    return Err(if job.cancel.load(Ordering::Relaxed) { "Cancelled".into() } else { format!("{}: {e}", src.display()) });
+                    return Err(if job.ctl.cancel.load(Ordering::Relaxed) { "Cancelled".into() } else { format!("{}: {e}", src.display()) });
                 }
                 p.done_bytes = done_bytes;
+                p.verified_bytes = verified_bytes;
                 if job.cut {
                     let r = if src.is_dir() && !src.is_symlink() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
                     r.map_err(|e| format!("{}: {e}", src.display()))?;
@@ -435,7 +463,8 @@ fn same_fs(a: &Path, b: &Path) -> bool {
 }
 
 /// Copy a file or folder (symlinks stay links); `on_bytes` returns false to cancel.
-fn copy_tree(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> std::io::Result<()> {
+/// `on_bytes(copied, verified)` reports progress; false stops the copy.
+fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64, u64) -> bool) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
         std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
@@ -443,20 +472,46 @@ fn copy_tree(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> s
         std::fs::create_dir(dst)?;
         for e in std::fs::read_dir(src)? {
             let e = e?;
-            copy_tree(&e.path(), &dst.join(e.file_name()), on_bytes)?;
+            copy_tree(&e.path(), &dst.join(e.file_name()), verify, on_bytes)?;
         }
         std::fs::set_permissions(dst, meta.permissions())
     } else {
         let (mut r, mut w) = (std::fs::File::open(src)?, std::fs::File::create(dst)?);
         let mut buf = vec![0u8; 4 << 20];
+        let mut hash = xxhash_rust::xxh3::Xxh3::new();
         loop {
             let n = r.read(&mut buf)?;
             if n == 0 {
                 break;
             }
             w.write_all(&buf[..n])?;
-            if !on_bytes(n as u64) {
+            if verify {
+                hash.update(&buf[..n]);
+            }
+            if !on_bytes(n as u64, 0) {
                 return Err(std::io::Error::other("cancelled"));
+            }
+        }
+        if verify {
+            // Read the copy back from the disk, not from the page cache.
+            w.sync_data()?;
+            // SAFETY: posix_fadvise only drops cached pages of our own open file.
+            unsafe { libc::posix_fadvise(std::os::fd::AsRawFd::as_raw_fd(&w), 0, 0, libc::POSIX_FADV_DONTNEED) };
+            drop(w);
+            let mut back = xxhash_rust::xxh3::Xxh3::new();
+            let mut r = std::fs::File::open(dst)?;
+            loop {
+                let n = r.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                back.update(&buf[..n]);
+                if !on_bytes(0, n as u64) {
+                    return Err(std::io::Error::other("cancelled"));
+                }
+            }
+            if back.digest128() != hash.digest128() {
+                return Err(std::io::Error::other("the copy differs from the original (xxHash check failed)"));
             }
         }
         std::fs::set_permissions(dst, meta.permissions())
@@ -465,10 +520,16 @@ fn copy_tree(src: &Path, dst: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> s
 
 /// "Copying 3/10 · 45% · 120 MB/s" for a progress toast.
 pub fn describe(p: &Progress, cut: bool, started: Instant) -> String {
-    let verb = if cut { "Moving" } else { "Copying" };
+    let verb = match (p.verifying, cut) {
+        (true, _) => "Verifying",
+        (false, true) => "Moving",
+        (false, false) => "Copying",
+    };
     let mut s = format!("{verb} {}/{}", (p.done_items + 1).min(p.total_items), p.total_items);
-    if let Some(pct) = (p.done_bytes * 100).checked_div(p.total_bytes) {
-        let rate = p.done_bytes as f64 / started.elapsed().as_secs_f64().max(0.001);
+    // Verified copies are read back: twice the bytes in all.
+    let (done, total) = (p.done_bytes + p.verified_bytes, p.total_bytes * if p.verify { 2 } else { 1 });
+    if let Some(pct) = (done * 100).checked_div(total) {
+        let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001);
         s += &format!(" · {pct}% · {}/s", glib::format_size(rate as u64));
     }
     s
@@ -493,8 +554,8 @@ mod tests {
         assert_eq!(conflicts(&[a.join("f.txt")], &b), 1);
         wait(transfer(vec![a.join("f.txt")], b.clone(), false, Conflict::Skip, Default::default())).unwrap();
         assert_eq!(std::fs::read_to_string(b.join("f.txt")).unwrap(), "old");
-        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
-        assert_eq!(wait(transfer(vec![a.join("f.txt")], b.clone(), false, Conflict::KeepBoth, cancel)).err().as_deref(), Some("Cancelled"));
+        let ctl = Arc::new(Control { cancel: AtomicBool::new(true), ..Default::default() });
+        assert_eq!(wait(transfer(vec![a.join("f.txt")], b.clone(), false, Conflict::KeepBoth, ctl)).err().as_deref(), Some("Cancelled"));
         assert!(!b.join("f (copy).txt").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -547,6 +608,23 @@ mod tests {
         let links = make_links(std::slice::from_ref(&renamed), true).unwrap();
         assert_eq!(links[0].file_name().unwrap(), "h (link).txt");
         assert!(new_folder(&b, "x/y").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pause_and_verify() {
+        let root = std::env::temp_dir().join(format!("kolphin-pause-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("big.bin"), vec![7u8; 3 << 20]).unwrap();
+        let ctl = Arc::new(Control { pause: AtomicBool::new(true), verify: AtomicBool::new(true), ..Default::default() });
+        let rx = transfer(vec![a.join("big.bin")], b.clone(), false, Conflict::KeepBoth, ctl.clone());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!b.join("big.bin").exists(), "nothing happens while paused");
+        ctl.pause.store(false, Ordering::Relaxed);
+        wait(rx).unwrap();
+        assert_eq!(std::fs::read(b.join("big.bin")).unwrap().len(), 3 << 20);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

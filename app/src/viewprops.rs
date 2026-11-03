@@ -164,6 +164,17 @@ pub fn set_check_updates_on_start(on: bool) {
     let _ = std::fs::write(settings_file(), v.to_string());
 }
 
+/// Read copies back and compare xxHashes (off by default: it reads every file twice).
+pub fn verify_copies() -> bool {
+    settings()["verify_copies"].as_bool().unwrap_or(false)
+}
+
+pub fn set_verify_copies(on: bool) {
+    let mut v = settings();
+    v["verify_copies"] = on.into();
+    let _ = std::fs::write(settings_file(), v.to_string());
+}
+
 /// Servers connected to before, newest first.
 pub fn recent_servers() -> Vec<String> {
     settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()

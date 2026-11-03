@@ -56,7 +56,7 @@ impl Toast {
     }
 
     pub fn builder() -> ToastBuilder {
-        ToastBuilder { title: String::new(), timeout: 3, button: None, on_button: None }
+        ToastBuilder { title: String::new(), timeout: 3, button: None, on_button: Vec::new() }
     }
 
     pub fn set_title(&self, title: &str) {
@@ -68,11 +68,13 @@ impl Toast {
     }
 }
 
+type ButtonFn = Box<dyn Fn(&gtk::Button)>;
+
 pub struct ToastBuilder {
     title: String,
     timeout: u32,
     button: Option<(String, Option<String>, Option<glib::Variant>)>,
-    on_button: Option<(String, Box<dyn Fn()>)>,
+    on_button: Vec<(String, ButtonFn)>,
 }
 
 impl ToastBuilder {
@@ -102,9 +104,9 @@ impl ToastBuilder {
         self
     }
 
-    /// A button running `f` (for example Cancel on a progress toast).
-    pub fn on_button(mut self, label: &str, f: impl Fn() + 'static) -> Self {
-        self.on_button = Some((label.to_string(), Box::new(f)));
+    /// A button running `f` (for example Pause or Cancel on a progress toast); `f` may relabel it.
+    pub fn on_button(mut self, label: &str, f: impl Fn(&gtk::Button) + 'static) -> Self {
+        self.on_button.push((label.to_string(), Box::new(f)));
         self
     }
 
@@ -121,9 +123,9 @@ impl ToastBuilder {
             b.connect_clicked(move |_| remove(&r));
             root.append(&b);
         }
-        if let Some((text, f)) = self.on_button {
+        for (text, f) in self.on_button {
             let b = gtk::Button::builder().label(&text).build();
-            b.connect_clicked(move |_| f());
+            b.connect_clicked(move |b| f(b));
             root.append(&b);
         }
         let close = gtk::Button::builder().icon_name("window-close-symbolic").css_classes(["flat", "circular"]).build();

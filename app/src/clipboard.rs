@@ -68,15 +68,22 @@ pub fn run_transfer(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf,
 }
 
 fn start(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf, cut: bool, policy: ops::Conflict) {
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let c = cancel.clone();
+    use std::sync::atomic::Ordering::Relaxed;
+    let ctl = std::sync::Arc::new(ops::Control::default());
+    ctl.verify.store(crate::viewprops::verify_copies(), Relaxed);
+    let (p, c) = (ctl.clone(), ctl.clone());
     let status = notify::Toast::builder()
         .title(if cut { "Moving…" } else { "Copying…" })
         .timeout(0)
-        .on_button("Cancel", move || c.store(true, std::sync::atomic::Ordering::Relaxed))
+        .on_button("Pause", move |b| {
+            let paused = !p.pause.load(Relaxed);
+            p.pause.store(paused, Relaxed);
+            b.set_label(if paused { "Resume" } else { "Pause" });
+        })
+        .on_button("Cancel", move |_| c.cancel.store(true, Relaxed))
         .build();
     toasts.add_toast(status.clone());
-    let rx = ops::transfer(sources, dest, cut, policy, cancel);
+    let rx = ops::transfer(sources, dest, cut, policy, ctl);
     let started = std::time::Instant::now();
     glib::spawn_future_local(glib::clone!(#[weak] toasts, async move {
         while let Ok(p) = rx.recv().await {

@@ -222,6 +222,7 @@ impl Win {
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
         menu.append(Some("Sidebar on Right"), Some("win.sidebar-right"));
         menu.append(Some("Use Kolphin as Default File Manager"), Some("win.default-fm"));
+        menu.append(Some("Verify Copies (xxHash)"), Some("win.verify-copies"));
         menu.append(Some("Check for Updates on Start"), Some("win.auto-update"));
         menu.append(Some("Check for Updates"), Some("win.check-update"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
@@ -964,6 +965,9 @@ impl Win {
                 Err(e) => format!("Could not change the default: {e}"),
             };
             w.toasts.add_toast(notify::Toast::new(&msg));
+        });
+        stateful("verify-copies", viewprops::verify_copies().to_variant(), |_, v| {
+            viewprops::set_verify_copies(v.get::<bool>().unwrap_or(false));
         });
         stateful("auto-update", viewprops::check_updates_on_start().to_variant(), |_, v| {
             viewprops::set_check_updates_on_start(v.get::<bool>().unwrap_or(true));
