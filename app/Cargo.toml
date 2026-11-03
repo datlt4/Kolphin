@@ -10,6 +10,7 @@ repository.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_6"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_1"] }
 async-channel = "2"
+flate2 = "1"
 imagesize = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 jpeg-decoder = "0.3"

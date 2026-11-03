@@ -15,6 +15,7 @@ mod ops;
 mod palette;
 mod pane;
 mod pathbar;
+mod pdf;
 mod props;
 mod newdoc;
 mod shelf;

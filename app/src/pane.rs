@@ -40,6 +40,8 @@ pub struct Pane {
     /// Filter mode: search recursively instead of filtering this folder.
     subfolders: gtk::ToggleButton,
     searching: Cell<bool>,
+    /// Selected entries in the order they were picked (Merge into PDF follows it).
+    sel_order: RefCell<Vec<u32>>,
     path: RefCell<PathBuf>,
     back: RefCell<Vec<PathBuf>>,
     forward: RefCell<Vec<PathBuf>>,
@@ -125,6 +127,7 @@ impl Pane {
             filter_bar,
             subfolders,
             searching: Default::default(),
+            sel_order: Default::default(),
             path: RefCell::new(path),
             back: Default::default(),
             forward: Default::default(),
@@ -467,6 +470,24 @@ impl Pane {
         Some(self.path().join(&*m.entries[i as usize].name))
     }
 
+    /// Keep the pick order: drop what is no longer selected, append new picks (several at once in view order).
+    fn sync_sel_order(&self) {
+        let now = self.canvas.selection();
+        let set: std::collections::HashSet<u32> = now.iter().copied().collect();
+        let mut order = self.sel_order.borrow_mut();
+        order.retain(|i| set.contains(i));
+        let known: std::collections::HashSet<u32> = order.iter().copied().collect();
+        order.extend(now.into_iter().filter(|i| !known.contains(i)));
+    }
+
+    /// Selected paths in the order they were picked.
+    pub fn selected_in_pick_order(&self) -> Vec<PathBuf> {
+        self.sync_sel_order();
+        let dir = self.path();
+        let m = self.canvas.model();
+        self.sel_order.borrow().iter().map(|&i| dir.join(&*m.entries[i as usize].name)).collect()
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         let dir = self.path();
         let m = self.canvas.model();
@@ -531,6 +552,7 @@ impl Pane {
         self.monitor.take();
         *self.changes.borrow_mut() = Changes::default();
         self.pending_select.take();
+        self.sel_order.borrow_mut().clear();
         let path = self.path();
         let show_hidden = self.canvas.model().show_hidden;
         self.canvas.reset(show_hidden);
@@ -647,7 +669,10 @@ impl Pane {
                 }
             }
             Action::Up => self.go_up(),
-            Action::Changed => self.update_status(),
+            Action::Changed => {
+                self.sync_sel_order();
+                self.update_status();
+            }
             Action::SortBy(key) => self.sort_by(key, None),
             Action::ViewChanged => {
                 self.sync_slider();
@@ -682,6 +707,19 @@ impl Pane {
             section(&[("Rename… (F2)", "win.rename"), ("Move to Trash (Del)", "win.trash"), ("Delete Permanently", "win.delete")]);
             if self.selected_paths().iter().any(|p| crate::archive::is_archive(p)) {
                 section(&[("Open Archive as Folder", "win.open-archive"), ("Extract Here", "win.extract")]);
+            }
+            let selected = self.selected_paths();
+            if selected.iter().all(|p| crate::pdf::convertible(p)) {
+                let pdf = gio::Menu::new();
+                if selected.iter().any(|p| !crate::pdf::is_pdf(p)) {
+                    pdf.append(Some("Convert to PDF"), Some("win.pdf-convert"));
+                }
+                if selected.len() > 1 {
+                    pdf.append(Some("Merge into PDF… (in the order picked)"), Some("win.pdf-merge"));
+                }
+                if pdf.n_items() > 0 {
+                    menu.append_section(Some("PDF"), &pdf);
+                }
             }
             section(&[("Compress…", "win.compress"), ("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);

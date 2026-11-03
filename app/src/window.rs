@@ -151,6 +151,20 @@ pub fn reveal(app: &adw::Application, items: &[PathBuf], properties: bool) {
 }
 
 /// Remember every window's tabs (called when the app quits, e.g. to restart after an update).
+/// Run a PDF job off the main thread with a progress toast, then report.
+fn run_pdf(w: &Rc<Win>, busy: &str, job: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    let toast = notify::Toast::builder().title(busy).timeout(0).build();
+    w.toasts.add_toast(toast.clone());
+    let weak = w.weak();
+    glib::spawn_future_local(async move {
+        let res = gio::spawn_blocking(job).await.unwrap_or_else(|_| Err("PDF job crashed".into()));
+        toast.dismiss();
+        if let Some(w) = weak.upgrade() {
+            w.toasts.add_toast(notify::Toast::new(&res.unwrap_or_else(|e| format!("PDF failed: {e}"))));
+        }
+    });
+}
+
 /// Copy/Move from a Drop Shelf into the active folder of the last focused window.
 pub fn shelf_transfer(items: Vec<PathBuf>, cut: bool) {
     if let Some(win) = WINDOWS.with(|w| w.borrow().last().cloned()) {
@@ -795,6 +809,26 @@ impl Win {
                 Err(e) => format!("Extract failed: {e}"),
             };
             w.toasts.add_toast(notify::Toast::new(&msg));
+        });
+        add("pdf-convert", |w| {
+            let files = w.pane().selected_in_pick_order();
+            run_pdf(w, "Converting to PDF…", move || crate::pdf::convert_each(&files).map(|made| format!("Made {} PDF(s)", made.len())));
+        });
+        add("pdf-merge", |w| {
+            let files = w.pane().selected_in_pick_order();
+            let dir = w.pane().path();
+            let name = ops::unique(&dir.join("Merged.pdf")).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let weak = w.weak();
+            dialogs::prompt(w.window.upcast_ref(), "Merge into PDF", &format!("{} files, in the order you picked them. PDF name:", files.len()), &name, move |name| {
+                let Some(w) = weak.upgrade() else { return };
+                let name = name.trim().to_string();
+                let out = ops::unique(&dir.join(if name.to_lowercase().ends_with(".pdf") { name } else { format!("{name}.pdf") }));
+                let files = files.clone();
+                run_pdf(&w, "Merging into PDF…", move || {
+                    crate::pdf::merge(&files, &out)?;
+                    Ok(format!("Made {}", out.file_name().unwrap_or_default().to_string_lossy()))
+                });
+            });
         });
         add("compress", |w| {
             let files = w.pane().selected_paths();

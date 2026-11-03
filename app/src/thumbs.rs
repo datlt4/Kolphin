@@ -235,7 +235,7 @@ fn decode_jpeg(path: &Path, size: u32) -> Option<RgbaImage> {
     RgbaImage::from_raw(w as u32, h as u32, rgba)
 }
 
-fn exif_orientation(path: &Path) -> u32 {
+pub fn exif_orientation(path: &Path) -> u32 {
     let Ok(f) = std::fs::File::open(path) else { return 1 };
     exif::Reader::new()
         .read_from_container(&mut BufReader::new(f))
@@ -244,7 +244,7 @@ fn exif_orientation(path: &Path) -> u32 {
         .unwrap_or(1)
 }
 
-fn orient(img: RgbaImage, o: u32) -> RgbaImage {
+pub fn orient(img: RgbaImage, o: u32) -> RgbaImage {
     use image::imageops::{flip_horizontal, flip_vertical, rotate180, rotate270, rotate90};
     match o {
         2 => flip_horizontal(&img),
