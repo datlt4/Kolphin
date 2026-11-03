@@ -9,6 +9,13 @@ pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let e = entry.clone().upcast::<gtk::Editable>();
     let w = entry.clone().upcast::<gtk::Widget>();
+    // A word is being typed with the input method (its preedit is showing).
+    let composing = std::rc::Rc::new(std::cell::Cell::new(false));
+    if let Some(t) = entry.delegate().and_downcast::<gtk::Text>() {
+        t.connect_preedit_changed(glib::clone!(#[strong] composing, move |_, p| composing.set(!p.is_empty())));
+    }
+    // Committed text lands in the field; some input methods never report the emptied preedit.
+    entry.connect_changed(glib::clone!(#[strong] composing, move |_| composing.set(false)));
     keys.connect_key_pressed(move |_, key, _, state| {
         // Enter: the input method commits its pending word once on focus-out; the key itself would commit it a
         // second time ("abc" → "abcabc"). Keep Enter from it, let focus-out commit, then activate.
@@ -31,6 +38,23 @@ pub fn ime_safe(entry: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>)) {
                 }
             });
             return glib::Propagation::Stop;
+        }
+        // Esc and Up/Down make the input method commit its pending word twice as well: commit it by focus-out
+        // instead and come back. Like other IMEs, the first Esc ends the word; the next one closes.
+        if composing.get() && matches!(key, gtk::gdk::Key::Escape | gtk::gdk::Key::Up | gtk::gdk::Key::Down) {
+            composing.set(false);
+            if let Some(root) = w.root() {
+                root.set_focus(None::<&gtk::Widget>);
+                let (root, e) = (root.downgrade(), e.clone());
+                glib::idle_add_local_once(move || {
+                    if root.upgrade().is_some_and(|r| r.focus().is_none()) {
+                        if let Some(t) = e.delegate().and_downcast::<gtk::Text>() {
+                            t.grab_focus_without_selecting();
+                        }
+                    }
+                });
+            }
+            return glib::Propagation::Proceed;
         }
         let modifier = state.intersects(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK);
         if !modifier && key.to_unicode().is_some_and(|c| !c.is_control()) && e.selection_bounds().is_some() {
@@ -61,6 +85,51 @@ fn dialog(parent: &gtk::Window, title: &str, width: i32, height: i32) -> (gtk::W
     (win, body)
 }
 
+/// Compress: an archive name and a format (formats whose tools are missing are greyed out); `f` gets the file name.
+pub fn compress(parent: &gtk::Window, stem: &str, f: impl Fn(String) + 'static) {
+    let (win, body) = dialog(parent, "Compress", 440, -1);
+    body.append(&gtk::Label::builder().label("Archive name").xalign(0.0).css_classes(["dim-label"]).build());
+    let entry = gtk::Entry::builder().text(stem).activates_default(true).build();
+    ime_safe(&entry);
+    body.append(&entry);
+    let formats = gtk::Grid::builder().column_spacing(18).row_spacing(8).column_homogeneous(true).build();
+    let mut first: Option<gtk::CheckButton> = None;
+    let chosen = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    for (i, (ext, programs, package)) in crate::archive::FORMATS.iter().enumerate() {
+        let radio = gtk::CheckButton::builder().label(format!(".{ext}")).build();
+        radio.set_group(first.as_ref());
+        if crate::archive::available(programs) {
+            if first.is_none() {
+                radio.set_active(true);
+                *chosen.borrow_mut() = ext.to_string();
+            }
+        } else {
+            radio.set_sensitive(false);
+            radio.set_tooltip_text(Some(&format!("Install the \"{package}\" package to create .{ext} archives")));
+        }
+        radio.connect_toggled(glib::clone!(#[strong] chosen, move |r| {
+            if r.is_active() {
+                *chosen.borrow_mut() = ext.to_string();
+            }
+        }));
+        first.get_or_insert(radio.clone());
+        formats.attach(&radio, i as i32 % 3, i as i32 / 3, 1, 1);
+    }
+    body.append(&formats);
+    let ok = gtk::Button::builder().label("Compress").css_classes(["suggested-action"]).halign(gtk::Align::End).build();
+    body.append(&ok);
+    win.set_default_widget(Some(&ok));
+    ok.connect_clicked(glib::clone!(#[weak] win, #[weak] entry, move |_| {
+        let name = entry.text().trim().to_string();
+        if !name.is_empty() && !chosen.borrow().is_empty() {
+            f(format!("{name}.{}", chosen.borrow()));
+            win.close();
+        }
+    }));
+    win.present();
+    entry.grab_focus();
+}
+
 /// Ask for one line of text; `f` gets it when the user presses Enter or OK.
 pub fn prompt(parent: &gtk::Window, title: &str, hint: &str, initial: &str, f: impl Fn(String) + 'static) {
     let (win, body) = dialog(parent, title, 420, -1);
@@ -85,6 +154,8 @@ pub fn pick_icon(parent: &gtk::Window, f: impl Fn(&'static str) + 'static) {
     let (win, body) = dialog(parent, "Choose Icon", 680, 560);
     let search = gtk::SearchEntry::builder().placeholder_text("Search icons").build();
     ime_safe(&search);
+    // The search field keeps Esc to itself.
+    search.connect_stop_search(glib::clone!(#[weak] win, move |_| win.close()));
     let names = gtk::StringList::new(&icons::all().collect::<Vec<_>>());
     let filter = gtk::CustomFilter::new(glib::clone!(#[weak] search, #[upgrade_or] true, move |o| {
         o.downcast_ref::<gtk::StringObject>().is_some_and(|s| s.string().contains(&*search.text().to_lowercase()))

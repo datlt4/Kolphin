@@ -66,6 +66,8 @@ pub fn show(parent: &gtk::ApplicationWindow) {
     body.append(&search);
     body.append(&gtk::ScrolledWindow::builder().child(&list).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build());
     let win = gtk::Window::builder().title("Command Palette").transient_for(parent).modal(true).decorated(false).default_width(560).default_height(420).child(&body).build();
+    // The search field keeps Esc to itself.
+    search.connect_stop_search(glib::clone!(#[weak] win, move |_| win.close()));
 
     let entries = Rc::new(entries);
     list.set_filter_func(glib::clone!(#[weak] search, #[strong] entries, #[upgrade_or] true, move |row| {

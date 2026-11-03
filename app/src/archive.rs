@@ -21,6 +21,21 @@ pub fn extract_here(archives: &[PathBuf]) -> Result<(), String> {
     quiet(Command::new("file-roller").arg("--extract-here").args(archives)).spawn().map(|_| ()).map_err(|e| format!("file-roller: {e}"))
 }
 
+/// Formats Compress offers: extension, the programs File Roller needs for it (any one), the package to install.
+pub const FORMATS: &[(&str, &[&str], &str)] = &[
+    ("zip", &["zip"], "zip"),
+    ("tar.gz", &["gzip"], "gzip"),
+    ("tar.xz", &["xz"], "xz-utils"),
+    ("tar.zst", &["zstd"], "zstd"),
+    ("7z", &["7z", "7za", "7zz"], "p7zip-full"),
+    ("rar", &["rar"], "rar"),
+];
+
+/// Is one of `programs` on PATH?
+pub fn available(programs: &[&str]) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| programs.iter().any(|p| d.join(p).is_file())))
+}
+
 /// Pack `files` into `archive`; the format comes from its extension.
 pub fn compress(archive: &Path, files: &[PathBuf]) -> Result<(), String> {
     quiet(Command::new("file-roller").arg(format!("--add-to={}", archive.display())).args(files)).spawn().map(|_| ()).map_err(|e| format!("file-roller: {e}"))

@@ -131,6 +131,9 @@ impl Shelf {
         let menu = gio::Menu::new();
         menu.append(Some("Copy to Current Folder"), Some("shelf.copy"));
         menu.append(Some("Move to Current Folder"), Some("shelf.move"));
+        if crate::kermius::installed() {
+            menu.append(Some("Share via Kermius"), Some("shelf.share"));
+        }
         menu.append(Some("Clear"), Some("shelf.clear"));
         let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").menu_model(&menu).halign(gtk::Align::End).valign(gtk::Align::Start).css_classes(["shelf-round"]).build();
         let close = round_button("window-close-symbolic");
@@ -222,6 +225,13 @@ impl Shelf {
             }));
             actions.add_action(&a);
         }
+        let share = gio::SimpleAction::new("share", None);
+        share.connect_activate(glib::clone!(#[strong] weak, move |_, _| {
+            if let Some(s) = weak.upgrade() {
+                crate::kermius::get().share(s.items.borrow().clone());
+            }
+        }));
+        actions.add_action(&share);
         let clear = gio::SimpleAction::new("clear", None);
         clear.connect_activate(glib::clone!(#[strong] weak, move |_, _| {
             if let Some(s) = weak.upgrade() {

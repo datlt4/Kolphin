@@ -778,10 +778,9 @@ impl Win {
             let Some(first) = files.first() else { return };
             let stem = if files.len() == 1 { first.file_stem().unwrap_or_default().to_string_lossy().into_owned() } else { "Archive".into() };
             let (dir, weak) = (w.pane().path(), w.weak());
-            let hint = "Archive name; the extension picks the format: .zip, .tar.gz, .tar.xz, .7z…";
-            dialogs::prompt(w.window.upcast_ref(), "Compress", hint, &format!("{stem}.zip"), move |name| {
+            dialogs::compress(w.window.upcast_ref(), &stem, move |name| {
                 let Some(w) = weak.upgrade() else { return };
-                let target = ops::unique(&dir.join(name.trim()));
+                let target = ops::unique(&dir.join(name));
                 let msg = match crate::archive::compress(&target, &files) {
                     Ok(()) => format!("Compressing into {}…", target.file_name().unwrap_or_default().to_string_lossy()),
                     Err(e) => format!("Compress failed: {e}"),
