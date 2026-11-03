@@ -55,6 +55,9 @@ pub struct Win {
     hosts: RefCell<Vec<(String, String)>>,
     /// (drive label, trash files dir) for the Trash ▾ menu.
     trashes: RefCell<Vec<(String, PathBuf)>>,
+    /// Free space and trashes, gathered in the background (see `SideInfo`).
+    side: RefCell<SideInfo>,
+    side_busy: Cell<bool>,
 }
 
 thread_local! {
@@ -86,7 +89,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.new-file('empty')", &["<Control><Alt>n"]),
         ("win.show-sidebar", &["F9"]),
         ("win.terminal", &["F4"]),
-        ("win.palette", &["<Control>k"]),
+        ("win.palette", &["<Control><Shift>p"]),
         ("win.shelf", &["<Control><Shift>d"]),
     ] {
         app.set_accels_for_action(action, keys);
@@ -99,6 +102,11 @@ pub fn open(app: &adw::Application, paths: &[PathBuf]) {
     let session = if paths.is_empty() && WINDOWS.with(|w| w.borrow().is_empty()) { viewprops::load_session() } else { None };
     match session {
         Some(s) => {
+            if s.hidden {
+                if let Some(a) = win.action("toggle-hidden") {
+                    a.activate(None);
+                }
+            }
             for tab in &s.tabs {
                 win.add_tab(tab[0].clone());
                 if let Some(second) = tab.get(1) {
@@ -165,6 +173,43 @@ fn run_pdf(w: &Rc<Win>, busy: &str, job: impl FnOnce() -> Result<String, String>
     });
 }
 
+/// Sidebar facts that need the disks (free space, trashes on other drives). Gathered off the main thread: a
+/// sleeping HDD or a network share must not hold up the window.
+#[derive(Default, Clone, PartialEq)]
+struct SideInfo {
+    usage: std::collections::HashMap<PathBuf, (u64, u64)>,
+    /// (drive label, trash files/ folder): the home trash first, then other drives' non-empty ones.
+    trashes: Vec<(String, PathBuf)>,
+    any_full: bool,
+    /// Network shares whose folder is gone (unmounted behind gvfs' back).
+    dead: Vec<PathBuf>,
+}
+
+/// `mounts`: mount points with their names.
+fn side_info(mounts: Vec<(PathBuf, String)>) -> SideInfo {
+    let (remote, mounts): (Vec<_>, Vec<_>) = mounts.into_iter().partition(|(p, _)| devices::is_remote(p));
+    let dead = remote.into_iter().map(|(p, _)| p).filter(|p| !p.is_dir()).collect();
+    let mut usage = std::collections::HashMap::new();
+    for p in std::iter::once(PathBuf::from("/")).chain(mounts.iter().map(|(p, _)| p.clone())) {
+        if let Some(u) = devices::usage(&p) {
+            usage.insert(p, u);
+        }
+    }
+    let full = |d: &PathBuf| std::fs::read_dir(d).is_ok_and(|mut r| r.next().is_some());
+    let dirs = ops::trash_dirs(&mounts.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+    let trashes: Vec<(String, PathBuf)> = dirs
+        .iter()
+        .enumerate()
+        .filter(|(i, d)| *i == 0 || full(d))
+        .map(|(i, d)| {
+            let label = if i == 0 { "Home".to_string() } else { mounts.iter().find(|(t, _)| d.starts_with(t)).map_or("drive".to_string(), |(_, n)| n.clone()) };
+            (label, d.clone())
+        })
+        .collect();
+    let any_full = trashes.iter().any(|(_, d)| full(d));
+    SideInfo { usage, trashes, any_full, dead }
+}
+
 /// Copy/Move from a Drop Shelf into the active folder of the last focused window.
 pub fn shelf_transfer(items: Vec<PathBuf>, cut: bool) {
     if let Some(win) = WINDOWS.with(|w| w.borrow().last().cloned()) {
@@ -216,7 +261,7 @@ impl Win {
         menu.append(Some("Random Sample…"), Some("win.random-sample"));
         menu.append(Some("Folder Statistics…"), Some("win.stats"));
         menu.append(Some("Connect to Server…"), Some("win.connect-server"));
-        menu.append(Some("Command Palette (Ctrl+K)"), Some("win.palette"));
+        menu.append(Some("Command Palette (Ctrl+Shift+P)"), Some("win.palette"));
         menu.append(Some("Drop Shelf (Ctrl+Shift+D)"), Some("win.shelf"));
         menu.append(Some("Edit Custom Actions…"), Some("win.edit-actions"));
         menu.append(Some("Show Sidebar (F9)"), Some("win.show-sidebar"));
@@ -282,6 +327,8 @@ impl Win {
             place_paths: Default::default(),
             hosts: Default::default(),
             trashes: Default::default(),
+            side: Default::default(),
+            side_busy: Default::default(),
         });
         win.setup_actions();
         win.setup_places();
@@ -339,7 +386,12 @@ impl Win {
             }
         }));
         win.window.connect_destroy(glib::clone!(#[strong] weak, move |_| {
-            WINDOWS.with(|w| w.borrow_mut().retain(|x| !std::ptr::eq(Rc::as_ptr(x), weak.as_ptr())));
+            // At process exit the list itself is being dropped (and drops this window): nothing to remove then.
+            let _ = WINDOWS.try_with(|w| {
+                if let Ok(mut w) = w.try_borrow_mut() {
+                    w.retain(|x| !std::ptr::eq(Rc::as_ptr(x), weak.as_ptr()));
+                }
+            });
         }));
         win
     }
@@ -435,7 +487,21 @@ impl Win {
         if tab.panes.borrow().len() == 1 {
             let pane = self.new_pane(&Rc::downgrade(&tab), active.path(), active.canvas.mode());
             tab.paned.set_end_child(Some(&pane.root));
-            tab.paned.set_position(tab.paned.width() / 2);
+            if tab.paned.width() > 0 {
+                tab.paned.set_position(tab.paned.width() / 2);
+            } else {
+                // Restored before the window has a size: split in half once it is laid out.
+                let handler: Rc<Cell<Option<glib::SignalHandlerId>>> = Default::default();
+                let h = handler.clone();
+                handler.set(Some(tab.paned.connect_max_position_notify(move |p| {
+                    if p.max_position() > 0 {
+                        p.set_position(p.max_position() / 2);
+                        if let Some(id) = h.take() {
+                            p.disconnect(id);
+                        }
+                    }
+                })));
+            }
             tab.panes.borrow_mut().push(pane);
             self.sync();
         } else {
@@ -512,7 +578,7 @@ impl Win {
         ordered.sort_by_key(|(i, _)| *i);
         let selected = self.tabs.selected_page().map_or(0, |p| self.tabs.page_position(&p).max(0) as usize);
         let tabs = ordered.into_iter().map(|(_, t)| t.panes.borrow().iter().map(|p| p.path()).collect()).collect();
-        viewprops::save_session(&viewprops::Session { tabs, selected });
+        viewprops::save_session(&viewprops::Session { tabs, selected, hidden: self.show_hidden.get() });
     }
 
     /// Put the sidebar on the left or right.
@@ -1068,9 +1134,10 @@ impl Win {
                     });
                 }
                 Some(Place::Server(uri)) => {
-                    let text = format!("Forget {uri}? Saved passwords stay in the keyring.");
+                    let text = format!("Forget {uri}? Its saved password is removed too, so the next connection asks again.");
                     dialogs::confirm(win.window.upcast_ref(), "Forget Server", &text, "Forget", move || {
                         viewprops::forget_server(&uri);
+                        devices::forget_password(&uri);
                         if let Some(w) = weak.upgrade() {
                             w.fill_places();
                         }
@@ -1156,7 +1223,30 @@ impl Win {
         });
     }
 
+    /// Rebuild the sidebar now from what is known, then refresh free space and trashes in the background.
     fn fill_places(self: &Rc<Self>) {
+        self.render_places();
+        if self.side_busy.replace(true) {
+            return;
+        }
+        let mounts: Vec<(PathBuf, String)> = gio::VolumeMonitor::get()
+            .mounts()
+            .iter()
+            .filter_map(|m| Some((m.root().path()?, m.name().to_string())))
+            .collect();
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let info = gio::spawn_blocking(move || side_info(mounts)).await.unwrap_or_default();
+            let Some(win) = weak.upgrade() else { return };
+            win.side_busy.set(false);
+            if *win.side.borrow() != info {
+                *win.side.borrow_mut() = info;
+                win.render_places();
+            }
+        });
+    }
+
+    fn render_places(self: &Rc<Self>) {
         while let Some(row) = self.places.row_at_index(0) {
             self.places.remove(&row);
         }
@@ -1241,22 +1331,12 @@ impl Win {
             add(themed("folder-symbolic"), &label, Place::Bookmark(path), None, None);
         }
 
-        // Trash: the home one always, plus non-empty trashes on other volumes (NTFS drives keep their own).
-        let monitor = gio::VolumeMonitor::get();
-        let tops: Vec<(PathBuf, String)> = monitor.mounts().iter().filter_map(|m| Some((m.root().path()?, m.name().to_string()))).collect();
-        let dirs = ops::trash_dirs(&tops.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
         // One Trash row; other drives' non-empty trashes are in its ▾ menu.
-        let full = |d: &PathBuf| std::fs::read_dir(d).is_ok_and(|mut r| r.next().is_some());
-        let trashes: Vec<(String, PathBuf)> = dirs
-            .iter()
-            .enumerate()
-            .filter(|(i, d)| *i == 0 || full(d))
-            .map(|(i, d)| {
-                let label = if i == 0 { "Home".to_string() } else { tops.iter().find(|(t, _)| d.starts_with(t)).map_or("drive".to_string(), |(_, n)| n.clone()) };
-                (label, d.clone())
-            })
-            .collect();
-        let any_full = trashes.iter().any(|(_, d)| full(d));
+        let monitor = gio::VolumeMonitor::get();
+        let side = self.side.borrow().clone();
+        let home_trash = glib::user_data_dir().join("Trash/files");
+        let trashes = if side.trashes.is_empty() { vec![("Home".to_string(), home_trash)] } else { side.trashes.clone() };
+        let any_full = side.any_full;
         let line = gtk::Box::builder().spacing(11).build();
         line.append(&gtk::Image::from_gicon(&themed(if any_full { "user-trash-full-symbolic" } else { "user-trash-symbolic" })));
         line.append(&gtk::Label::builder().label("Trash").hexpand(true).xalign(0.0).build());
@@ -1270,11 +1350,11 @@ impl Win {
             line.append(&gtk::MenuButton::builder().icon_name("pan-down-symbolic").menu_model(&menu).css_classes(["flat", "eject"]).tooltip_text("Trash on other drives").build());
         }
         self.places.append(&line);
-        places.borrow_mut().push(Some(Place::Path(dirs[0].clone())));
+        places.borrow_mut().push(Some(Place::Path(trashes[0].1.clone())));
         *self.trashes.borrow_mut() = trashes;
 
         title("DEVICES");
-        add(themed("drive-harddisk-symbolic"), "Root", Place::Path(PathBuf::from("/")), devices::usage(std::path::Path::new("/")), None);
+        add(themed("drive-harddisk-symbolic"), "Root", Place::Path(PathBuf::from("/")), side.usage.get(std::path::Path::new("/")).copied(), None);
         let mut network = Vec::new();
         for m in monitor.mounts() {
             let Some(path) = m.root().path() else { continue };
@@ -1283,7 +1363,7 @@ impl Win {
                 continue;
             }
             let eject = devices::ejectable(&m).then(|| m.clone());
-            add(m.symbolic_icon(), &m.name(), Place::Path(path.clone()), devices::usage(&path), eject);
+            add(m.symbolic_icon(), &m.name(), Place::Path(path.clone()), side.usage.get(&path).copied(), eject);
         }
         // Plugged in but not mounted yet (USB sticks, other partitions): click to mount.
         for v in monitor.volumes() {
@@ -1297,7 +1377,7 @@ impl Win {
         for m in network {
             let uri = m.root().uri().to_string();
             // A share whose folder is gone was unmounted behind gvfs' back: offer the saved server instead.
-            if let Some(path) = m.root().path().filter(|p| p.is_dir()) {
+            if let Some(path) = m.root().path().filter(|p| !side.dead.contains(p)) {
                 shown.push(uri.clone());
                 add(m.symbolic_icon(), &m.name(), Place::Share(path, uri), None, Some(m.clone()));
             }

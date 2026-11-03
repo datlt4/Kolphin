@@ -689,6 +689,7 @@ impl Pane {
 
     fn context_menu(&self, x: f64, y: f64, on_item: bool) {
         let menu = gio::Menu::new();
+        let mut customs = Vec::new();
         let section = |items: &[(&str, &str)]| {
             let s = gio::Menu::new();
             for (label, action) in items {
@@ -699,7 +700,7 @@ impl Pane {
         if ops_trash(&self.path()) {
             section(&[("Restore", "win.restore"), ("Delete Permanently", "win.delete")]);
             section(&[("Empty Trash", "win.empty-trash"), ("Quick Look (Space)", "win.quicklook")]);
-            return self.popup_menu(&menu, x, y);
+            return self.popup_menu(&menu, x, y, &[]);
         }
         if on_item {
             section(&[("Open", "win.open-selected"), ("Open With…", "win.open-with"), ("Open in New Tab", "win.open-tab-selected"), ("Quick Look (Space)", "win.quicklook"), ("Add to Bookmarks", "win.add-bookmark")]);
@@ -728,9 +729,13 @@ impl Pane {
             section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder")]);
             // New File (empty) and New Document ▸ blank office documents and ~/Templates.
             let new = gio::Menu::new();
+            // GTK 4.6 menus draw no icons for plain items: each row is a custom widget (see `popup_menu`).
+            let rows = RefCell::new(Vec::new());
             let item = |label: &str, id: &str| {
                 let it = gio::MenuItem::new(Some(label), None);
-                it.set_action_and_target_value(Some("win.new-file"), Some(&id.to_variant()));
+                let slot = format!("new-{}", rows.borrow().len());
+                it.set_attribute_value("custom", Some(&slot.to_variant()));
+                rows.borrow_mut().push((slot, label.to_string(), id.to_string()));
                 it
             };
             new.append_item(&item("New File…", "empty"));
@@ -753,6 +758,7 @@ impl Pane {
             }
             new.append_submenu(Some("New Document"), &docs);
             menu.append_section(None, &new);
+            customs = rows.into_inner();
             section(&[("Select All", "win.select-all"), ("Bookmark This Folder", "win.add-bookmark")]);
             section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
             section(&[("Folder Statistics…", "win.stats"), ("Properties", "win.properties")]);
@@ -765,11 +771,24 @@ impl Pane {
             custom.append_item(&item);
         }
         menu.append_section(None, &custom);
-        self.popup_menu(&menu, x, y);
+        self.popup_menu(&menu, x, y, &customs);
     }
 
-    fn popup_menu(&self, menu: &gio::Menu, x: f64, y: f64) {
+    /// `customs`: (slot, label, new-file id) rows drawn with a file-type icon.
+    fn popup_menu(&self, menu: &gio::Menu, x: f64, y: f64, customs: &[(String, String, String)]) {
         let pop = gtk::PopoverMenu::from_model(Some(menu));
+        for (slot, label, id) in customs {
+            let row = gtk::Box::builder().spacing(8).build();
+            let icon = crate::newdoc::default_name(id).map_or("file", |n| crate::icons::icon_name(&n, false));
+            let img = gtk::Image::builder().pixel_size(16).build();
+            img.set_paintable(crate::icons::texture(icon, 32).as_ref());
+            row.append(&img);
+            row.append(&gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build());
+            let b = gtk::Button::builder().child(&row).css_classes(["flat", "menu-row"]).action_name("win.new-file").build();
+            b.set_action_target_value(Some(&id.to_variant()));
+            b.connect_clicked(glib::clone!(#[weak] pop, move |_| pop.popdown()));
+            pop.add_child(&b, slot);
+        }
         pop.set_parent(&self.canvas);
         pop.set_has_arrow(false);
         pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));

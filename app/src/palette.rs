@@ -1,4 +1,4 @@
-//! Command palette (Ctrl+K): type to filter every command and custom action, Enter runs it.
+//! Command palette (Ctrl+Shift+P): type to filter every command and custom action, Enter runs it.
 use gtk::{gdk, gio, glib, prelude::*};
 use std::rc::Rc;
 

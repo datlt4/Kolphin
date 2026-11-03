@@ -20,6 +20,26 @@ pub fn ejectable(m: &gio::Mount) -> bool {
 }
 
 /// A password prompt that defaults to "Remember forever" (the keyring), so shares don't ask again.
+/// Delete the passwords gvfs saved in the keyring for this server (Secret Service over D-Bus), so the next
+/// connection asks for it again: after the password changed, the stale one would otherwise be tried silently.
+pub fn forget_password(uri: &str) {
+    let Ok(u) = glib::Uri::parse(uri, glib::UriFlags::NONE) else { return };
+    let Some(host) = u.host() else { return };
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else { return };
+    let mut query = std::collections::HashMap::new();
+    query.insert("protocol".to_string(), u.scheme().to_string());
+    query.insert("server".to_string(), host.to_string());
+    let call = |path: &str, iface: &str, method: &str, args: Option<&glib::Variant>| {
+        bus.call_sync(Some("org.freedesktop.secrets"), path, iface, method, args, None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>).ok()
+    };
+    let Some(found) = call("/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "SearchItems", Some(&(query,).to_variant())) else { return };
+    // (unlocked, locked) item paths; only unlocked ones can be deleted without a prompt.
+    let Some((unlocked, _)) = found.get::<(Vec<glib::variant::ObjectPath>, Vec<glib::variant::ObjectPath>)>() else { return };
+    for item in unlocked {
+        call(item.as_str(), "org.freedesktop.Secret.Item", "Delete", None);
+    }
+}
+
 fn mount_op(parent: &gtk::Window) -> gtk::MountOperation {
     let op = gtk::MountOperation::new(Some(parent));
     op.set_password_save(gio::PasswordSave::Permanently);

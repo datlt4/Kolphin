@@ -125,6 +125,7 @@ progressbar progress { min-height: 6px; border-radius: 99px; background: @accent
 .shelf-row:hover { background: alpha(@accent_color, 0.18); }
 .shelf-remove { min-width: 22px; min-height: 22px; padding: 0; opacity: 0.6; }
 .shelf-remove:hover { opacity: 1; background: rgba(255,255,255,0.14); }
+.menu-row { padding: 6px 10px; min-height: 0; border-radius: 6px; font-weight: normal; }
 .toast { padding: 8px 8px 8px 16px; border-radius: 12px; background: #262b38; color: #e6e8ee; border: 1px solid #363c4b; box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
 .filterbar button:checked { background: alpha(@accent_color, 0.22); color: #ffffff; box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.6); }
 .filterbar { margin: 0 12px 6px; }

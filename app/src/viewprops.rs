@@ -35,7 +35,27 @@ fn file() -> PathBuf {
 fn with_store<T>(f: impl FnOnce(&mut HashMap<PathBuf, ViewProps>) -> T) -> T {
     STORE.with(|s| {
         let mut s = s.borrow_mut();
-        let map = s.get_or_insert_with(|| std::fs::read(file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
+        let map = s.get_or_insert_with(|| {
+            let map: HashMap<PathBuf, ViewProps> = std::fs::read(file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            if settings()["props_by_real_path"].as_bool() == Some(true) {
+                return map;
+            }
+            // Once: move entries saved under a symlinked path to the real folder (its own entry wins).
+            let mut out: HashMap<PathBuf, ViewProps> = HashMap::new();
+            for (k, v) in map {
+                let real = key(&k);
+                if real == k || !out.contains_key(&real) {
+                    out.insert(real, v);
+                }
+            }
+            if let Ok(json) = serde_json::to_vec(&out) {
+                write_store(&json);
+            }
+            let mut v = settings();
+            v["props_by_real_path"] = true.into();
+            write_settings(&v);
+            out
+        });
         f(map)
     })
 }
@@ -49,8 +69,7 @@ fn key(dir: &Path) -> PathBuf {
 }
 
 pub fn load(dir: &Path) -> Option<ViewProps> {
-    // Older entries were saved under the path as typed.
-    with_store(|m| m.get(&key(dir)).or_else(|| m.get(dir)).cloned())
+    with_store(|m| m.get(&key(dir)).cloned())
 }
 
 pub fn save(dir: &Path, props: ViewProps) {
@@ -63,17 +82,27 @@ pub fn save(dir: &Path, props: ViewProps) {
         serde_json::to_vec(m).ok()
     });
     if let Some(json) = json {
-        let path = file();
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(tmp, path);
-        }
+        write_store(&json);
+    }
+}
+
+fn write_store(json: &[u8]) {
+    let path = file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(tmp, path);
     }
 }
 
 fn settings_file() -> PathBuf {
     gtk::glib::user_data_dir().join("kolphin").join("settings.json")
+}
+
+fn write_settings(v: &serde_json::Value) {
+    let path = settings_file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(path, v.to_string());
 }
 
 fn settings() -> serde_json::Value {
@@ -139,12 +168,19 @@ pub fn set_custom_icon(paths: &[PathBuf], icon: Option<&str>) {
 pub struct Session {
     pub tabs: Vec<Vec<PathBuf>>,
     pub selected: usize,
+    /// Hidden files were shown.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 pub fn save_session(s: &Session) {
+    // Dev and benchmark runs share these settings with the installed app: never replace its session.
+    if cfg!(debug_assertions) || std::env::var_os("KOLPHIN_BENCH").is_some() {
+        return;
+    }
     let mut v = settings();
     v["session"] = serde_json::to_value(s).unwrap_or_default();
-    let _ = std::fs::write(settings_file(), v.to_string());
+    write_settings(&v);
 }
 
 /// The saved session, keeping only folders that still exist.
@@ -161,7 +197,7 @@ pub fn check_updates_on_start() -> bool {
 pub fn set_check_updates_on_start(on: bool) {
     let mut v = settings();
     v["check_updates"] = on.into();
-    let _ = std::fs::write(settings_file(), v.to_string());
+    write_settings(&v);
 }
 
 /// Read copies back and compare xxHashes (off by default: it reads every file twice).
@@ -172,7 +208,7 @@ pub fn verify_copies() -> bool {
 pub fn set_verify_copies(on: bool) {
     let mut v = settings();
     v["verify_copies"] = on.into();
-    let _ = std::fs::write(settings_file(), v.to_string());
+    write_settings(&v);
 }
 
 /// Servers connected to before, newest first.
@@ -184,7 +220,7 @@ pub fn forget_server(uri: &str) {
     let list: Vec<String> = recent_servers().into_iter().filter(|u| u != uri).collect();
     let mut s = settings();
     s["servers"] = list.into();
-    let _ = std::fs::write(settings_file(), s.to_string());
+    write_settings(&s);
 }
 
 pub fn add_recent_server(uri: &str) {

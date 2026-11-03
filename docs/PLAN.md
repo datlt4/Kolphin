@@ -54,7 +54,7 @@ File manager cho Linux viết bằng Rust, lấy cảm hứng từ Dolphin. Ưu 
 - ✅ Kéo thả vào/ra app khác (cùng ổ = move, khác ổ = copy; Shift/Ctrl để ép).
 - ✅ "Mở bằng…" + đặt app mặc định.
 - ✅ Properties + hash MD5 / SHA256 / SHA512 / xxHash3 trong **1 lần đọc**, tự so với hash trong clipboard.
-- ✅ **Quick Look (Space)**: ảnh, khung hình video, text; ←/→ chuyển file. Còn: phát video (cần libgtk-4-media-gstreamer).
+- ✅ **Quick Look (Space)**: ảnh, khung hình video, text; ←/→ chuyển file. (Không phát video: không cần.)
 - ✅ **Mở file nén như folder** (gvfs archive), Extract Here, Compress… (File Roller).
 
 ### M5 — Thiết bị & mạng ✅ (v0.7.0, trừ host Kermius)

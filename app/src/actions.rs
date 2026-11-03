@@ -2,7 +2,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-const DEFAULT: &str = r#"# Kolphin custom actions: shown in the right-click menu and the command palette (Ctrl+K).
+const DEFAULT: &str = r#"# Kolphin custom actions: shown in the right-click menu and the command palette (Ctrl+Shift+P).
 # Placeholders in `command`:
 #   {dir}    the folder being shown
 #   {target} the selected folder if exactly one is selected, else {dir}

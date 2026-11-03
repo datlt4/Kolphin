@@ -49,11 +49,11 @@ Koi's Dolphin: a fast, dark file manager for Linux, written in Rust with GTK4. V
 
 ### Everything else
 
-- **Command palette** (Ctrl+K): find any action by name.
+- **Command palette** (Ctrl+Shift+P): find any action by name.
 - **Properties**: copy a file's name, location or path. Compute MD5, SHA-256, SHA-512 and xxHash checksums in one
   pass, or paste a checksum to check it.
 - **Archives**: open zip, tar, 7z, rar and iso files as folders, Extract Here, or Compress… to any format.
-- **PDF**: Convert to PDF (images, and office documents through LibreOffice), or Merge into PDF: the selected files
+- **PDF**: Convert to PDF (images, and office documents through ONLYOFFICE Desktop Editors or LibreOffice), or Merge into PDF: the selected files
   become one PDF in the order you picked them; existing PDFs are kept as they are (merging them uses `pdfunite`).
 - **New File / New Document**: empty files (Ctrl+Alt+N), blank Word, Excel, PowerPoint and OpenDocument files that
   open in LibreOffice, ONLYOFFICE, WPS or MS Office, and your own templates from `~/Templates`.
@@ -106,7 +106,7 @@ cargo run --release
 
 | Keys | Action |
 |---|---|
-| Ctrl+K | Command palette |
+| Ctrl+Shift+P | Command palette |
 | Ctrl+L / F6 | Type a path |
 | Ctrl+F / Ctrl+I | Search subfolders / filter this folder |
 | Ctrl+1 / 2 / 3 | Icons / Compact / Details |

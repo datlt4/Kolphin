@@ -1,5 +1,5 @@
 //! Convert to PDF / merge into one PDF. Images are written here (one A4 page each, fitted, upright per EXIF);
-//! documents go through LibreOffice; pages are joined with pdfunite (poppler-utils).
+//! documents go through ONLYOFFICE's converter (or LibreOffice); pages are joined with pdfunite (poppler-utils).
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -108,9 +108,76 @@ fn write_pictures(pictures: &[Picture], out: &Path) -> Result<(), String> {
     std::fs::write(out, pdf).map_err(|e| e.to_string())
 }
 
-/// A document turned into `out` by LibreOffice (headless, into a scratch folder so nothing is overwritten).
+/// A document turned into `out`: ONLYOFFICE's converter when it is installed (deb or Flatpak), else LibreOffice.
 fn office_to_pdf(doc: &Path, out: &Path, scratch: &Path) -> Result<(), String> {
-    let office = ["soffice", "libreoffice"].into_iter().find(|p| on_path(p)).ok_or("Converting documents needs LibreOffice (sudo apt install libreoffice)")?;
+    if let Some(x2t) = OnlyOffice::find() {
+        if x2t.convert(doc, out, scratch).is_ok() {
+            return Ok(());
+        }
+    }
+    libreoffice_to_pdf(doc, out, scratch)
+}
+
+/// ONLYOFFICE Desktop Editors' converter (x2t) and the font list it needs (made when the editors first ran).
+struct OnlyOffice {
+    /// How to run x2t: the program, then arguments before the params file.
+    run: Vec<String>,
+    fonts: PathBuf,
+    /// Root of the editors as x2t sees it (inside the Flatpak sandbox for the Flatpak).
+    root: &'static str,
+}
+
+impl OnlyOffice {
+    fn find() -> Option<OnlyOffice> {
+        let home = gtk::glib::home_dir();
+        let deb = Path::new("/opt/onlyoffice/desktopeditors/converter/x2t");
+        let fonts = home.join(".local/share/onlyoffice/desktopeditors/data/fonts");
+        if deb.is_file() && fonts.join("AllFonts.js").is_file() {
+            return Some(OnlyOffice { run: vec![deb.display().to_string()], fonts, root: "/opt/onlyoffice/desktopeditors" });
+        }
+        let fonts = home.join(".var/app/org.onlyoffice.desktopeditors/data/onlyoffice/desktopeditors/data/fonts");
+        let installed = ["/var/lib/flatpak/app/org.onlyoffice.desktopeditors", ".local/share/flatpak/app/org.onlyoffice.desktopeditors"]
+            .iter()
+            .any(|d| home.join(d).is_dir());
+        (installed && on_path("flatpak") && fonts.join("AllFonts.js").is_file()).then(|| OnlyOffice {
+            run: ["flatpak", "run", "--command=/app/bin/opt/onlyoffice/desktopeditors/converter/x2t", "org.onlyoffice.desktopeditors"].map(String::from).to_vec(),
+            fonts,
+            root: "/app/bin/opt/onlyoffice/desktopeditors",
+        })
+    }
+
+    fn convert(&self, doc: &Path, out: &Path, scratch: &Path) -> Result<(), String> {
+        let esc = |p: &Path| p.display().to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        // 513: PDF.
+        let params = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<TaskQueueDataConvert><m_sFileFrom>{}</m_sFileFrom><m_sFileTo>{}</m_sFileTo><m_nFormatTo>513</m_nFormatTo><m_sAllFontsPath>{}</m_sAllFontsPath><m_sFontDir>{}</m_sFontDir><m_sThemeDir>{}/editors/sdkjs/slide/themes</m_sThemeDir><m_bDontSaveAdditional>true</m_bDontSaveAdditional></TaskQueueDataConvert>",
+            esc(doc),
+            esc(out),
+            esc(&self.fonts.join("AllFonts.js")),
+            esc(&self.fonts),
+            self.root
+        );
+        let file = scratch.join(format!("x2t-{}.xml", std::fs::read_dir(scratch).map_or(0, |d| d.count())));
+        std::fs::write(&file, params).map_err(|e| e.to_string())?;
+        let status = Command::new(&self.run[0])
+            .args(&self.run[1..])
+            .arg(&file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() && out.is_file() {
+            Ok(())
+        } else {
+            let _ = std::fs::remove_file(out);
+            Err(format!("ONLYOFFICE could not convert {}", doc.display()))
+        }
+    }
+}
+
+/// LibreOffice, headless, into a scratch folder so nothing is overwritten.
+fn libreoffice_to_pdf(doc: &Path, out: &Path, scratch: &Path) -> Result<(), String> {
+    let office = ["soffice", "libreoffice"].into_iter().find(|p| on_path(p)).ok_or("Converting documents needs ONLYOFFICE Desktop Editors or LibreOffice")?;
     let dir = scratch.join(format!("doc{}", std::fs::read_dir(scratch).map_or(0, |d| d.count())));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let status = Command::new(office)
