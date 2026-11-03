@@ -42,13 +42,13 @@ const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
 
-/// A drop moves with Shift held; otherwise (no key, or Ctrl) it copies. Over X11 the key state is not passed on,
-/// but the dragging side narrows its offer to MOVE (Shift) or COPY (Ctrl).
+/// A drop moves (no key, or Shift); with Ctrl held it copies. Over X11 the key state is not passed on, but the
+/// dragging side narrows its offer to MOVE (Shift) or COPY (Ctrl).
 fn drop_action(t: &gtk::DropTarget) -> bool {
     match t.current_drop().map(|d| d.actions()) {
         Some(a) if a == gdk::DragAction::MOVE => true,
         Some(a) if a == gdk::DragAction::COPY => false,
-        _ => t.current_event_state().contains(gdk::ModifierType::SHIFT_MASK),
+        _ => !t.current_event_state().contains(gdk::ModifierType::CONTROL_MASK),
     }
 }
 
