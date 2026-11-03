@@ -34,8 +34,22 @@ jobs:
           mkdir -p "kolphin-$VERSION"
           cp target/release/kolphin assets/kolphin.desktop assets/icons/kolphin-256.png "kolphin-$VERSION/"
           tar czf "kolphin_${VERSION}_linux_${{ matrix.arch }}.tar.gz" "kolphin-$VERSION"
+      - name: Build AppImage (GTK4 and libadwaita bundled)
+        # A broken AppImage build must not hold back the .deb.
+        continue-on-error: true
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH=$(uname -m)
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$ARCH.AppImage"
+          wget -q https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy-*.AppImage linuxdeploy-plugin-gtk.sh
+          cp assets/icons/kolphin-256.png kolphin.png
+          export APPIMAGE_EXTRACT_AND_RUN=1 DEPLOY_GTK_VERSION=4 LDAI_OUTPUT="kolphin_${VERSION}_${ARCH}.AppImage"
+          ./linuxdeploy-$ARCH.AppImage --appdir AppDir --executable target/release/kolphin \
+            --desktop-file assets/kolphin.desktop --icon-file kolphin.png --plugin gtk --output appimage
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             kolphin_*.deb
             kolphin_*.tar.gz
+            kolphin_*.AppImage

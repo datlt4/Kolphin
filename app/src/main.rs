@@ -199,7 +199,7 @@ fn offer(toasts: &gtk::Overlay, rel: update::Release) {
         .title(&title)
         .button_label(button)
         .action_name("win.install-update")
-        .action_target(&rel.deb_url.to_variant())
+        .action_target(&rel.url.to_variant())
         .timeout(0)
         .build();
     toasts.add_toast(toast);

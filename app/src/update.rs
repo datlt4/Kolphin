@@ -1,4 +1,5 @@
-//! Install / self-update from GitHub Releases: download the .deb for this CPU, install it with pkexec, restart.
+//! Install / self-update from GitHub Releases: download the .deb for this CPU and install it with pkexec, or, when
+//! running as an AppImage, replace the AppImage file; then restart.
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,7 +11,8 @@ const INSTALLED_EXE: &str = "/usr/bin/kolphin";
 
 pub struct Release {
     pub version: String,
-    pub deb_url: String,
+    /// The .deb, or the AppImage when running as one.
+    pub url: String,
     /// Kolphin is not installed system-wide yet (running from a tarball or a dev build).
     pub fresh_install: bool,
 }
@@ -21,9 +23,16 @@ pub fn check() -> Result<Option<Release>, String> {
     let resp = agent.get(LATEST).header("User-Agent", "Kolphin").call().map_err(|e| e.to_string())?;
     let location = resp.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("");
     let Some(version) = version_from_location(location) else { return Ok(None) }; // no release published yet
-    let deb_url = format!("{DOWNLOAD}/v{version}/kolphin_{version}_{}.deb", deb_arch());
-    let fresh_install = !Path::new(INSTALLED_EXE).exists();
-    Ok((fresh_install || newer(&version, env!("CARGO_PKG_VERSION"))).then_some(Release { version, deb_url, fresh_install }))
+    let (url, fresh_install) = match appimage() {
+        Some(_) => (format!("{DOWNLOAD}/v{version}/kolphin_{version}_{}.AppImage", std::env::consts::ARCH), false),
+        None => (format!("{DOWNLOAD}/v{version}/kolphin_{version}_{}.deb", deb_arch()), !Path::new(INSTALLED_EXE).exists()),
+    };
+    Ok((fresh_install || newer(&version, env!("CARGO_PKG_VERSION"))).then_some(Release { version, url, fresh_install }))
+}
+
+/// The AppImage file this process runs from, if any.
+fn appimage() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file())
 }
 
 fn version_from_location(location: &str) -> Option<String> {
@@ -53,8 +62,19 @@ pub fn download(url: &str, progress: impl Fn(u64, u64)) -> Result<PathBuf, Strin
     Ok(path)
 }
 
-/// Install the .deb as root (polkit asks for the password); apt pulls missing dependencies.
+/// Install the download: a new AppImage replaces the running one; a .deb goes in as root (polkit asks for the
+/// password) and apt pulls missing dependencies.
 pub fn install(deb: &Path) -> Result<(), String> {
+    if let Some(target) = appimage().filter(|_| deb.extension().is_some_and(|e| e == "AppImage")) {
+        // Next to the target first, so the final rename is atomic.
+        let tmp = target.with_extension("AppImage.new");
+        let r = std::fs::copy(deb, &tmp)
+            .and_then(|_| std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755)))
+            .and_then(|_| std::fs::rename(&tmp, &target));
+        let _ = std::fs::remove_file(deb);
+        let _ = std::fs::remove_file(&tmp);
+        return r.map_err(|e| format!("{}: {e}", target.display()));
+    }
     let out = Command::new("pkexec")
         .args(["apt-get", "install", "-y", "--allow-downgrades"])
         .arg(deb)
@@ -70,8 +90,9 @@ pub fn install(deb: &Path) -> Result<(), String> {
 
 /// Start the installed Kolphin once this process has exited (GApplication would otherwise hand off to us).
 pub fn restart_later() {
-    let script = format!("while kill -0 {} 2>/dev/null; do sleep 0.1; done; exec {INSTALLED_EXE}", std::process::id());
-    let _ = Command::new("sh").args(["-c", &script]).spawn();
+    let exe = appimage().map_or(INSTALLED_EXE.to_string(), |p| p.display().to_string());
+    let script = format!("while kill -0 {} 2>/dev/null; do sleep 0.1; done; exec \"$0\"", std::process::id());
+    let _ = Command::new("sh").args(["-c", &script, &exe]).spawn();
 }
 
 fn deb_arch() -> &'static str {

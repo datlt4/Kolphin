@@ -36,8 +36,9 @@ Koi's Dolphin: a fast, dark file manager for Linux, written in Rust with GTK4. V
 
 - **Selection checkboxes**: a checkbox appears when you hover an item. Click it to add or remove the item without
   holding Ctrl. Drag on empty space between items to select a rectangle.
-- **Copy and move**: transfers run in a background queue with progress and a Cancel button. Cancelling removes the
-  half-copied file. When a name already exists, Kolphin asks whether to skip, replace (the old file goes to the
+- **Copy and move**: transfers run in a background queue with progress, Pause/Resume and Cancel buttons. Cancelling removes the
+  half-copied file. Turn on *Verify Copies (xxHash)* in the menu to read every copy back from the disk and
+  compare it with the original. When a name already exists, Kolphin asks whether to skip, replace (the old file goes to the
   Trash) or keep both.
 - **Undo** (Ctrl+Z) for moves, new items and trashing. **Batch rename** many files at once.
 - **Trash**, including the trashes on NTFS and other external drives, with Restore and Empty Trash.
@@ -82,6 +83,9 @@ sudo apt install ./kolphin_*_amd64.deb
 ```
 
 After this first install, Kolphin updates itself: when a new release is out, click **Update** in the notification.
+
+An AppImage (`kolphin_<version>_x86_64.AppImage` or `aarch64`) bundles GTK 4 and libadwaita: `chmod +x` it and run
+it. It updates itself in place. It needs `libfuse2`; without it, run it with `--appimage-extract-and-run`.
 
 A plain tarball (`kolphin_<version>_linux_<arch>.tar.gz`) is also published. Run the `kolphin` binary inside it;
 the app offers to install itself system-wide.
