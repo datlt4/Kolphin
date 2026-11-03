@@ -52,6 +52,8 @@ Koi's Dolphin: a fast, dark file manager for Linux, written in Rust with GTK4. V
 - **Properties**: copy a file's name, location or path. Compute MD5, SHA-256, SHA-512 and xxHash checksums in one
   pass, or paste a checksum to check it.
 - **Archives**: open zip, tar, 7z, rar and iso files as folders, Extract Here, or Compress… to any format.
+- **New File / New Document**: empty files (Ctrl+Alt+N), blank Word, Excel, PowerPoint and OpenDocument files that
+  open in LibreOffice, ONLYOFFICE, WPS or MS Office, and your own templates from `~/Templates`.
 - **Devices**: USB drives can be mounted and ejected, and each drive shows a usage bar; hover it for % used and free
   space.
 - **Network**: SMB/SFTP/FTP servers (passwords can be saved), plus the hosts Kolphin finds on your local network.
@@ -110,6 +112,7 @@ cargo run --release
 | Alt+Enter | Properties |
 | Ctrl+H | Show hidden files |
 | Ctrl+Shift+N | New folder |
+| Ctrl+Alt+N | New empty file |
 | Ctrl+Shift+D | New Drop Shelf |
 | Space | Quick Look |
 

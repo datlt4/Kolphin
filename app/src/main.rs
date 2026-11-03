@@ -16,6 +16,7 @@ mod palette;
 mod pane;
 mod pathbar;
 mod props;
+mod newdoc;
 mod shelf;
 mod quicklook;
 mod search;

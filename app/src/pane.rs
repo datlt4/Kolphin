@@ -687,7 +687,35 @@ impl Pane {
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
             section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {
-            section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder"), ("Select All", "win.select-all"), ("Bookmark This Folder", "win.add-bookmark")]);
+            section(&[("Paste", "win.paste"), ("New Folder… (Ctrl+Shift+N)", "win.new-folder")]);
+            // New File (empty) and New Document ▸ blank office documents and ~/Templates.
+            let new = gio::Menu::new();
+            let item = |label: &str, id: &str| {
+                let it = gio::MenuItem::new(Some(label), None);
+                it.set_action_and_target_value(Some("win.new-file"), Some(&id.to_variant()));
+                it
+            };
+            new.append_item(&item("New File…", "empty"));
+            let docs = gio::Menu::new();
+            let (plain, office) = crate::newdoc::KINDS[1..].split_at(2);
+            for list in [plain, office] {
+                let sec = gio::Menu::new();
+                for (id, label, _, _) in list {
+                    sec.append_item(&item(label, id));
+                }
+                docs.append_section(None, &sec);
+            }
+            let templates = crate::newdoc::user_templates();
+            if !templates.is_empty() {
+                let sec = gio::Menu::new();
+                for t in templates {
+                    sec.append_item(&item(&t.file_name().unwrap_or_default().to_string_lossy(), &format!("template:{}", t.display())));
+                }
+                docs.append_section(None, &sec);
+            }
+            new.append_submenu(Some("New Document"), &docs);
+            menu.append_section(None, &new);
+            section(&[("Select All", "win.select-all"), ("Bookmark This Folder", "win.add-bookmark")]);
             section(&[("Select by Pattern…", "win.select-pattern"), ("Random Sample…", "win.random-sample")]);
             section(&[("Folder Statistics…", "win.stats"), ("Properties", "win.properties")]);
         }

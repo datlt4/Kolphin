@@ -4,6 +4,7 @@ use crate::actions;
 use crate::bookmarks;
 use crate::clipboard;
 use crate::kermius;
+use crate::newdoc;
 use crate::palette;
 use crate::shelf;
 use crate::devices;
@@ -82,6 +83,7 @@ pub fn set_accels(app: &adw::Application) {
         ("win.filter", &["<Control>i"]),
         ("win.search", &["<Control>f"]),
         ("win.new-folder", &["<Control><Shift>n"]),
+        ("win.new-file('empty')", &["<Control><Alt>n"]),
         ("win.show-sidebar", &["F9"]),
         ("win.terminal", &["F4"]),
         ("win.palette", &["<Control>k"]),
@@ -733,6 +735,27 @@ impl Win {
             }
         });
         self.window.add_action(&open_trash);
+        // New File / New Document: the target is a kind from newdoc::KINDS or "template:<path>".
+        let new_file = gio::SimpleAction::new("new-file", Some(glib::VariantTy::STRING));
+        let w = self.weak();
+        new_file.connect_activate(move |_, v| {
+            let (Some(win), Some(id)) = (w.upgrade(), v.and_then(|v| v.get::<String>())) else { return };
+            let Some(name) = newdoc::default_name(&id) else { return };
+            let dir = win.pane().path();
+            let name = ops::unique(&dir.join(name)).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let weak = win.weak();
+            dialogs::prompt(win.window.upcast_ref(), "New File", "File name:", &name, move |name| {
+                let Some(w) = weak.upgrade() else { return };
+                match newdoc::create(&dir, name.trim(), &id) {
+                    Ok(p) => {
+                        ops::record(ops::Undo::Created(vec![p.clone()]));
+                        w.pane().select_when_loaded(p.file_name().unwrap_or_default().to_os_string());
+                    }
+                    Err(e) => w.toasts.add_toast(notify::Toast::new(&format!("New file failed: {e}"))),
+                }
+            });
+        });
+        self.window.add_action(&new_file);
         let custom = gio::SimpleAction::new("custom-action", Some(glib::VariantTy::INT32));
         let w = self.weak();
         custom.connect_activate(move |_, v| {
