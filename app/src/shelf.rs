@@ -55,7 +55,7 @@ fn uri_list(paths: &[PathBuf]) -> gdk::ContentProvider {
     gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from_owned((uris.join("\r\n") + "\r\n").into_bytes()))
 }
 
-/// Drags from `widget` carry `paths()`; a completed drag hands them to `done`.
+/// Drags from `widget` carry `paths()`; once they were moved away, `done` gets them (a copy leaves the shelf as is).
 fn drag_out(widget: &impl IsA<gtk::Widget>, shelf: &Rc<Shelf>, paths: impl Fn(&Shelf) -> Vec<PathBuf> + 'static, done: impl Fn(&Rc<Shelf>, Vec<PathBuf>) + 'static) {
     let src = gtk::DragSource::new();
     src.set_actions(gdk::DragAction::COPY | gdk::DragAction::MOVE);
@@ -95,10 +95,10 @@ fn drag_out(widget: &impl IsA<gtk::Widget>, shelf: &Rc<Shelf>, paths: impl Fn(&S
             false
         }
     ));
-    src.connect_drag_end(move |_, _, _| {
+    src.connect_drag_end(move |_, _, moved| {
         let Some(s) = weak.upgrade() else { return };
         s.dragging.set(false);
-        if !cancelled.get() {
+        if moved && !cancelled.get() {
             done(&s, taken.take());
         }
     });
@@ -139,11 +139,12 @@ impl Shelf {
         let close = round_button("window-close-symbolic");
         let card = gtk::Overlay::builder().child(&body).css_classes(["shelf"]).build();
         card.add_overlay(&hint);
+        // The strip along the top (between ✕ and ⋯) moves the shelf; the rest of the card drags files.
+        let handle = gtk::WindowHandle::builder().child(&gtk::Box::builder().height_request(40).build()).valign(gtk::Align::Start).build();
+        card.add_overlay(&handle);
         card.add_overlay(&close);
         card.add_overlay(&more);
-        // Dragging the empty parts of the card moves the window.
-        let handle = gtk::WindowHandle::builder().child(&card).build();
-        let win = gtk::Window::builder().application(app).title("Drop Shelf").decorated(false).resizable(false).css_classes(["shelf-window"]).child(&handle).build();
+        let win = gtk::Window::builder().application(app).title("Drop Shelf").decorated(false).resizable(false).css_classes(["shelf-window"]).child(&card).build();
 
         let (thumb_tx, rx) = async_channel::unbounded::<thumbs::Done>();
         let shelf = Rc::new(Shelf {

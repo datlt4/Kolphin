@@ -42,18 +42,14 @@ const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
 
-/// Move (true) or copy: Shift forces move, Ctrl forces copy, otherwise move within one filesystem (like Nautilus).
-fn drop_action(t: &gtk::DropTarget, files: &[gio::File], dir: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let state = t.current_event_state();
-    if state.contains(gdk::ModifierType::SHIFT_MASK) {
-        return true;
+/// A drop moves with Shift held; otherwise (no key, or Ctrl) it copies. Over X11 the key state is not passed on,
+/// but the dragging side narrows its offer to MOVE (Shift) or COPY (Ctrl).
+fn drop_action(t: &gtk::DropTarget) -> bool {
+    match t.current_drop().map(|d| d.actions()) {
+        Some(a) if a == gdk::DragAction::MOVE => true,
+        Some(a) if a == gdk::DragAction::COPY => false,
+        _ => t.current_event_state().contains(gdk::ModifierType::SHIFT_MASK),
     }
-    if state.contains(gdk::ModifierType::CONTROL_MASK) {
-        return false;
-    }
-    let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
-    files.first().and_then(|f| f.path()).is_some_and(|p| dev(&p).is_some() && dev(&p) == dev(dir))
 }
 
 /// Wrap long names without inserting "-" at the break.
@@ -1174,18 +1170,22 @@ impl Canvas {
 
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
         drop.set_preload(true);
+        // X11 drops carry no key state: remember the choice made while hovering.
+        let moving = std::rc::Rc::new(std::cell::Cell::new(false));
         drop.connect_motion(glib::clone!(
             #[weak(rename_to = c)]
             self,
+            #[strong]
+            moving,
             #[upgrade_or]
             gdk::DragAction::empty(),
             move |t, x, y| {
-                let (dir, folder) = c.drop_dir(x, y);
+                let (_, folder) = c.drop_dir(x, y);
                 if c.imp().hover.replace(folder) != folder {
                     c.queue_draw();
                 }
-                let files = t.value().and_then(|v| v.get::<gdk::FileList>().ok()).map(|l| l.files()).unwrap_or_default();
-                if drop_action(t, &files, &dir) { gdk::DragAction::MOVE } else { gdk::DragAction::COPY }
+                moving.set(drop_action(t));
+                if moving.get() { gdk::DragAction::MOVE } else { gdk::DragAction::COPY }
             }
         ));
         drop.connect_leave(glib::clone!(#[weak(rename_to = c)] self, move |_| {
@@ -1197,11 +1197,11 @@ impl Canvas {
             self,
             #[upgrade_or]
             false,
-            move |t, value, x, y| {
+            move |_, value, x, y| {
                 let Ok(list) = value.get::<gdk::FileList>() else { return false };
                 let files = list.files();
                 let (dir, _) = c.drop_dir(x, y);
-                let cut = drop_action(t, &files, &dir);
+                let cut = moving.get();
                 let paths: Vec<std::path::PathBuf> = files.iter().filter_map(|f| f.path()).filter(|p| p.parent() != Some(dir.as_path()) && *p != dir).collect();
                 if paths.is_empty() {
                     return false;
