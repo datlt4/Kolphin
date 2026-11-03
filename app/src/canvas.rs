@@ -817,22 +817,7 @@ impl Canvas {
             }
             // Selection checkbox (hovered or selected items): toggles without Ctrl.
             if imp.hover.get() == Some(idx) || selected {
-                let (cx, cy, d) = g.checkbox(x, y);
-                let disc = gsk::RoundedRect::from_rect(rect(cx, cy, d, d), (d / 2.0) as f32);
-                snap.push_rounded_clip(&disc);
-                snap.append_color(&if selected { accent } else { gdk::RGBA::new(0.08, 0.09, 0.11, 0.75) }, &rect(cx, cy, d, d));
-                snap.pop();
-                let ring = if selected { accent } else { alpha(&fg, 0.7) };
-                snap.append_border(&disc, &[1.5; 4], &[ring, ring, ring, ring]);
-                if selected {
-                    let l = self.create_pango_layout(None);
-                    l.set_markup(&format!("<span size='{}' weight='800'>✓</span>", (d * 0.55 * 0.75 * pango::SCALE as f64) as i32));
-                    let (cw, ch) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64);
-                    snap.save();
-                    snap.translate(&graphene::Point::new((cx + (d - cw) / 2.0) as f32, (cy + (d - ch) / 2.0) as f32));
-                    snap.append_layout(&l, &gdk::RGBA::WHITE);
-                    snap.restore();
-                }
+                self.draw_checkbox(snap, g.checkbox(x, y), selected, &accent, &fg);
             }
             if self.mode() == ViewMode::Icons && selected && imp.cursor.get() == Some(idx) {
                 expand = Some((idx, x, y, drawn_icon.clone()));
@@ -893,6 +878,7 @@ impl Canvas {
                     snap.append_texture(&tex, &ir);
                     snap.pop();
                 }
+                self.draw_checkbox(snap, g.checkbox(x, y), true, &accent, &fg);
                 snap.save();
                 snap.translate(&graphene::Point::new((bx + 6.0) as f32, ty as f32));
                 snap.append_layout(&full, &fg);
@@ -1401,6 +1387,25 @@ impl Canvas {
                 self.emit(Action::ContextMenu { x, y, on_item: hit.is_some() });
             }
             _ => {}
+        }
+    }
+
+    fn draw_checkbox(&self, snap: &gtk::Snapshot, (cx, cy, d): (f64, f64, f64), checked: bool, accent: &gdk::RGBA, fg: &gdk::RGBA) {
+        let r = graphene::Rect::new(cx as f32, cy as f32, d as f32, d as f32);
+        let disc = gsk::RoundedRect::from_rect(r, (d / 2.0) as f32);
+        snap.push_rounded_clip(&disc);
+        snap.append_color(&if checked { *accent } else { gdk::RGBA::new(0.08, 0.09, 0.11, 0.75) }, &r);
+        snap.pop();
+        let ring = if checked { *accent } else { gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), fg.alpha() * 0.7) };
+        snap.append_border(&disc, &[1.5; 4], &[ring, ring, ring, ring]);
+        if checked {
+            let l = self.create_pango_layout(None);
+            l.set_markup(&format!("<span size='{}' weight='800'>✓</span>", (d * 0.55 * 0.75 * pango::SCALE as f64) as i32));
+            let (cw, ch) = (l.pixel_size().0 as f64, l.pixel_size().1 as f64);
+            snap.save();
+            snap.translate(&graphene::Point::new((cx + (d - cw) / 2.0) as f32, (cy + (d - ch) / 2.0) as f32));
+            snap.append_layout(&l, &gdk::RGBA::WHITE);
+            snap.restore();
         }
     }
 
