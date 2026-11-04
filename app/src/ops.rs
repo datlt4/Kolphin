@@ -462,6 +462,11 @@ fn same_fs(a: &Path, b: &Path) -> bool {
     matches!((std::fs::symlink_metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
 }
 
+/// Best effort: SMB and other FUSE mounts refuse chmod (os error 95).
+fn keep_permissions(dst: &Path, meta: &std::fs::Metadata) {
+    let _ = std::fs::set_permissions(dst, meta.permissions());
+}
+
 /// Copy a file or folder (symlinks stay links); `on_bytes` returns false to cancel.
 /// `on_bytes(copied, verified)` reports progress; false stops the copy.
 fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64, u64) -> bool) -> std::io::Result<()> {
@@ -474,7 +479,8 @@ fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64,
             let e = e?;
             copy_tree(&e.path(), &dst.join(e.file_name()), verify, on_bytes)?;
         }
-        std::fs::set_permissions(dst, meta.permissions())
+        keep_permissions(dst, &meta);
+        Ok(())
     } else {
         let (mut r, mut w) = (std::fs::File::open(src)?, std::fs::File::create(dst)?);
         let mut buf = vec![0u8; 4 << 20];
@@ -494,7 +500,7 @@ fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64,
         }
         if verify {
             // Read the copy back from the disk, not from the page cache.
-            w.sync_data()?;
+            let _ = w.sync_data();
             // SAFETY: posix_fadvise only drops cached pages of our own open file.
             unsafe { libc::posix_fadvise(std::os::fd::AsRawFd::as_raw_fd(&w), 0, 0, libc::POSIX_FADV_DONTNEED) };
             drop(w);
@@ -514,7 +520,8 @@ fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64,
                 return Err(std::io::Error::other("the copy differs from the original (xxHash check failed)"));
             }
         }
-        std::fs::set_permissions(dst, meta.permissions())
+        keep_permissions(dst, &meta);
+        Ok(())
     }
 }
 
@@ -626,5 +633,22 @@ mod tests {
         wait(rx).unwrap();
         assert_eq!(std::fs::read(b.join("big.bin")).unwrap().len(), 3 << 20);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn moves_to_fuse_share() {
+        // Needs a mounted share that refuses chmod; skipped otherwise.
+        let Ok(dest) = std::env::var("KOLPHIN_FUSE_DIR") else { return };
+        let src = std::env::temp_dir().join(format!("kolphin-fuse-{}", std::process::id()));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("f.bin"), vec![1u8; 1 << 20]).unwrap();
+        let dest = PathBuf::from(dest);
+        for verify in [false, true] {
+            let ctl = Arc::new(Control { verify: AtomicBool::new(verify), ..Default::default() });
+            wait(transfer(vec![src.join("f.bin")], dest.clone(), false, Conflict::Replace, ctl)).unwrap();
+            assert_eq!(std::fs::metadata(dest.join("f.bin")).unwrap().len(), 1 << 20);
+            std::fs::remove_file(dest.join("f.bin")).unwrap();
+        }
+        std::fs::remove_dir_all(&src).unwrap();
     }
 }
