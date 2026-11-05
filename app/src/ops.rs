@@ -407,7 +407,10 @@ fn run(job: Job) {
                     continue;
                 }
                 Conflict::Replace => {
-                    trash(std::slice::from_ref(&wanted))?;
+                    // Shares without a trash (SMB) can't take it: the old file is deleted instead.
+                    if trash(std::slice::from_ref(&wanted)).is_err() {
+                        delete_permanently(std::slice::from_ref(&wanted))?;
+                    }
                     wanted
                 }
                 Conflict::KeepBoth => unique(&wanted),
@@ -647,7 +650,9 @@ mod tests {
             let ctl = Arc::new(Control { verify: AtomicBool::new(verify), ..Default::default() });
             wait(transfer(vec![src.join("f.bin")], dest.clone(), false, Conflict::Replace, ctl)).unwrap();
             assert_eq!(std::fs::metadata(dest.join("f.bin")).unwrap().len(), 1 << 20);
-            std::fs::remove_file(dest.join("f.bin")).unwrap();
+            if verify {
+                std::fs::remove_file(dest.join("f.bin")).unwrap();
+            }
         }
         std::fs::remove_dir_all(&src).unwrap();
     }
