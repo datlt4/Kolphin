@@ -234,11 +234,17 @@ pub fn choose(parent: &gtk::Window, title: &str, hint: &str, items: Vec<String>,
 }
 
 /// Name clashes in a copy/move: Replace (old ones to the trash), Skip, or Keep Both; closing cancels.
-pub fn conflict(parent: &gtk::Window, n: usize, dest: &str, f: impl Fn(crate::ops::Conflict) + 'static) {
+/// On network shares without a trash, Replace deletes permanently: `on_remote` changes the warning.
+pub fn conflict(parent: &gtk::Window, n: usize, dest: &str, on_remote: bool, f: impl Fn(crate::ops::Conflict) + 'static) {
     use crate::ops::Conflict;
     let (win, body) = dialog(parent, "Items Already Exist", 460, -1);
     body.append(&gtk::Label::builder().label(format!("{n} item(s) with the same name already exist in “{dest}”.")).xalign(0.0).wrap(true).build());
-    body.append(&gtk::Label::builder().label("Replace moves the existing items to the trash.").xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    let note = if on_remote {
+        "Replace on a network share without a trash deletes permanently."
+    } else {
+        "Replace moves the existing items to the trash."
+    };
+    body.append(&gtk::Label::builder().label(note).xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let buttons = gtk::Box::builder().spacing(8).halign(gtk::Align::End).build();
     let f = std::rc::Rc::new(f);
     for (label, choice, class) in [("Skip", Conflict::Skip, ""), ("Replace", Conflict::Replace, "destructive-action"), ("Keep Both", Conflict::KeepBoth, "suggested-action")] {

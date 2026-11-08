@@ -6,9 +6,11 @@ use std::process::Command;
 
 /// Status letter per child name: U conflict, M modified, D deleted, A added, ? untracked. None outside a repo.
 pub fn status(dir: &Path) -> Option<HashMap<OsString, char>> {
-    let prefix = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "--show-prefix"]).output().ok().filter(|o| o.status.success())?;
+    // Never run repo-controlled helpers: a malicious clone/share could set core.fsmonitor to RCE on open.
+    let helper: &[&str] = &["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+    let prefix = Command::new("git").arg("-C").arg(dir).args(helper).args(["rev-parse", "--show-prefix"]).env("GIT_OPTIONAL_LOCKS", "0").output().ok().filter(|o| o.status.success())?;
     let prefix = String::from_utf8_lossy(&prefix.stdout).trim().to_string();
-    let out = Command::new("git").arg("-C").arg(dir).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "."]).output().ok()?;
+    let out = Command::new("git").arg("-C").arg(dir).args(helper).args(["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "."]).env("GIT_OPTIONAL_LOCKS", "0").output().ok()?;
     let rank = |c: char| match c {
         'U' => 5,
         'M' => 4,

@@ -103,8 +103,15 @@ pub fn walk(root: &Path, stop: &AtomicBool, tx: &async_channel::Sender<(u64, u64
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let Ok(meta) = e.metadata() else { continue };
-            if meta.is_dir() {
+            // Never follow symlinks: a link to / or a loop must not escape or hang the walk.
+            let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+            if meta.file_type().is_symlink() {
+                // Count the link itself, don't descend even if it points at a dir.
+                if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {
+                    n += 1;
+                    size += meta.len();
+                }
+            } else if meta.is_dir() {
                 stack.push(e.path());
             } else if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {
                 n += 1;

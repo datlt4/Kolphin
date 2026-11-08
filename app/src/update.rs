@@ -36,28 +36,65 @@ fn appimage() -> Option<PathBuf> {
 }
 
 fn version_from_location(location: &str) -> Option<String> {
+    // Only accept same-host /releases/tag/vX.Y.Z redirects; reject off-host or query URLs.
     let v = location.rsplit_once("/tag/v")?.1;
-    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+    let v = v.split(['?', '#', '/']).next().unwrap_or("");
+    if v.is_empty() || v.len() > 32 || !v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    if !location.starts_with("https://github.com/datlt4/Kolphin/releases/tag/v") {
+        return None;
+    }
+    Some(v.to_string())
 }
+
+const MAX_DOWNLOAD: u64 = 200 << 20;
 
 /// Download to the cache dir, reporting (bytes so far, total).
 pub fn download(url: &str, progress: impl Fn(u64, u64)) -> Result<PathBuf, String> {
+    // Only our own release assets over HTTPS.
+    let ok_prefix = url.starts_with(&format!("{DOWNLOAD}/v")) && (url.ends_with(".deb") || url.ends_with(".AppImage"));
+    if !ok_prefix {
+        return Err("Refusing to download from an unexpected URL".into());
+    }
     let dir = gtk::glib::user_cache_dir().join("kolphin");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(url.rsplit('/').next().unwrap_or("kolphin.deb"));
     let mut resp = ureq::get(url).header("User-Agent", "Kolphin").call().map_err(|e| e.to_string())?;
     let total = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
+    if total > MAX_DOWNLOAD {
+        return Err("Release file is unexpectedly large".into());
+    }
     let mut reader = resp.body_mut().as_reader();
     let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     let (mut buf, mut done) = (vec![0u8; 256 * 1024], 0u64);
+    // Magic bytes: .deb is `!<arch>`, AppImage/ELF is `\x7fELF`.
+    let mut head: Vec<u8> = Vec::with_capacity(8);
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
+        if done > MAX_DOWNLOAD {
+            let _ = std::fs::remove_file(&path);
+            return Err("Release file is unexpectedly large".into());
+        }
+        if head.len() < 8 {
+            head.extend_from_slice(&buf[..n.min(8 - head.len())]);
+        }
+        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         progress(done, total);
+    }
+    if done < 1024 {
+        let _ = std::fs::remove_file(&path);
+        return Err("Release file is too small".into());
+    }
+    let is_deb = path.extension().is_some_and(|e| e == "deb");
+    let magic_ok = if is_deb { head.starts_with(b"!<arch>") } else { head.starts_with(b"\x7fELF") };
+    if !magic_ok {
+        let _ = std::fs::remove_file(&path);
+        return Err("Release file has the wrong format".into());
     }
     Ok(path)
 }
@@ -65,6 +102,21 @@ pub fn download(url: &str, progress: impl Fn(u64, u64)) -> Result<PathBuf, Strin
 /// Install the download: a new AppImage replaces the running one; a .deb goes in as root (polkit asks for the
 /// password) and apt pulls missing dependencies.
 pub fn install(deb: &Path) -> Result<(), String> {
+    // Re-check magic at install time (TOCTOU guard if the cache file changed).
+    let mut head = [0u8; 8];
+    let magic_ok = std::fs::File::open(deb)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head).map(|_| head))
+        .map(|h| {
+            if deb.extension().is_some_and(|e| e == "AppImage") {
+                h.starts_with(b"\x7fELF")
+            } else {
+                h.starts_with(b"!<arch>")
+            }
+        })
+        .unwrap_or(false);
+    if !magic_ok {
+        return Err("Refusing to install: wrong file format".into());
+    }
     if let Some(target) = appimage().filter(|_| deb.extension().is_some_and(|e| e == "AppImage")) {
         // Next to the target first, so the final rename is atomic.
         let tmp = target.with_extension("AppImage.new");
@@ -76,7 +128,7 @@ pub fn install(deb: &Path) -> Result<(), String> {
         return r.map_err(|e| format!("{}: {e}", target.display()));
     }
     let out = Command::new("pkexec")
-        .args(["apt-get", "install", "-y", "--allow-downgrades"])
+        .args(["apt-get", "install", "-y"])
         .arg(deb)
         .output()
         .map_err(|e| e.to_string())?;
@@ -115,6 +167,9 @@ mod tests {
     fn version_from_redirect() {
         assert_eq!(super::version_from_location("https://github.com/datlt4/Kolphin/releases/tag/v0.6.0").as_deref(), Some("0.6.0"));
         assert_eq!(super::version_from_location("https://github.com/datlt4/Kolphin/releases"), None);
+        // Off-host or query-stripped redirects are rejected.
+        assert_eq!(super::version_from_location("https://evil.com/releases/tag/v9.9.9"), None);
+        assert_eq!(super::version_from_location("https://github.com/datlt4/Kolphin/releases/tag/v1.0?evil=1").as_deref(), Some("1.0"));
     }
 
     #[test]

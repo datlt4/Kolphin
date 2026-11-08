@@ -61,7 +61,8 @@ pub fn run_transfer(toasts: &gtk::Overlay, sources: Vec<PathBuf>, dest: PathBuf,
         Some(parent) if clashes > 0 => {
             let name = dest.file_name().map_or("/".into(), |n| n.to_string_lossy().into_owned());
             let toasts = toasts.clone();
-            crate::dialogs::conflict(&parent, clashes, &name, move |policy| start(&toasts, sources.clone(), dest.clone(), cut, policy));
+            let on_remote = crate::devices::is_remote(&dest);
+            crate::dialogs::conflict(&parent, clashes, &name, on_remote, move |policy| start(&toasts, sources.clone(), dest.clone(), cut, policy));
         }
         _ => start(toasts, sources, dest, cut, ops::Conflict::KeepBoth),
     }

@@ -196,8 +196,17 @@ fn libreoffice_to_pdf(doc: &Path, out: &Path, scratch: &Path) -> Result<(), Stri
 }
 
 fn scratch_dir() -> Result<PathBuf, String> {
-    let d = std::env::temp_dir().join(format!("kolphin-pdf-{}-{:?}", std::process::id(), std::time::SystemTime::now()));
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Unpredictable + 0700: converted documents can be sensitive.
+    let d = std::env::temp_dir().join(format!(
+        "kolphin-pdf-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d).map_err(|e| e.to_string())?;
+    let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
     Ok(d)
 }
 

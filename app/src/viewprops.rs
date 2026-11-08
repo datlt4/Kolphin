@@ -86,13 +86,21 @@ pub fn save(dir: &Path, props: ViewProps) {
     }
 }
 
-fn write_store(json: &[u8]) {
-    let path = file();
+fn write_secure(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(tmp, path);
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_err() {
+        return;
     }
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    let _ = std::fs::rename(tmp, path);
+    // Rename keeps the tmp mode; enforce on the final file too (existing file may be 644).
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+fn write_store(json: &[u8]) {
+    write_secure(&file(), json);
 }
 
 fn settings_file() -> PathBuf {
@@ -100,9 +108,7 @@ fn settings_file() -> PathBuf {
 }
 
 fn write_settings(v: &serde_json::Value) {
-    let path = settings_file();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(path, v.to_string());
+    write_secure(&settings_file(), v.to_string().as_bytes());
 }
 
 fn settings() -> serde_json::Value {
@@ -116,9 +122,7 @@ pub fn sidebar_right() -> bool {
 pub fn set_sidebar_right(right: bool) {
     let mut s = settings();
     s["sidebar_right"] = right.into();
-    let path = settings_file();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(path, s.to_string());
+    write_settings(&s);
 }
 
 thread_local! {
@@ -157,9 +161,7 @@ pub fn set_custom_icon(paths: &[PathBuf], icon: Option<&str>) {
         serde_json::to_vec(m).ok()
     });
     if let Some(json) = json {
-        let path = icons_file();
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let _ = std::fs::write(path, json);
+        write_secure(&icons_file(), &json);
     }
 }
 
@@ -211,9 +213,16 @@ pub fn set_verify_copies(on: bool) {
     write_settings(&v);
 }
 
-/// Servers connected to before, newest first.
+/// Servers connected to before, newest first (passwords are never stored: legacy entries are stripped on read).
 pub fn recent_servers() -> Vec<String> {
-    settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
+    let list: Vec<String> = settings()["servers"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+    let clean: Vec<String> = list.iter().map(|u| crate::devices::strip_credentials(&crate::devices::normalize(u))).collect();
+    if clean != list {
+        let mut s = settings();
+        s["servers"] = clean.clone().into();
+        write_settings(&s);
+    }
+    clean
 }
 
 pub fn forget_server(uri: &str) {
@@ -224,15 +233,15 @@ pub fn forget_server(uri: &str) {
 }
 
 pub fn add_recent_server(uri: &str) {
+    // Never persist passwords: `smb://user:pass@h/s` -> `smb://user@h/s`.
+    let uri = crate::devices::strip_credentials(&crate::devices::normalize(uri));
     let mut list = recent_servers();
-    list.retain(|u| u != uri);
-    list.insert(0, uri.to_string());
+    list.retain(|u| u != &uri);
+    list.insert(0, uri);
     list.truncate(8);
     let mut s = settings();
     s["servers"] = list.into();
-    let path = settings_file();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(path, s.to_string());
+    write_settings(&s);
 }
 
 #[cfg(test)]

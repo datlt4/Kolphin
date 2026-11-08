@@ -9,8 +9,20 @@ pub fn usage(path: &Path) -> Option<(u64, u64)> {
     (size > 0).then_some((free, size))
 }
 
+/// gvfs FUSE dir, e.g. /run/user/1000/gvfs.
+pub fn gvfs_root() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) => PathBuf::from(d).join("gvfs"),
+        None => PathBuf::from(format!("/run/user/{}/gvfs", crate::ops::uid())),
+    }
+}
+
 /// gvfs FUSE paths are network shares: no free-space query (it can block).
 pub fn is_remote(path: &Path) -> bool {
+    if path.starts_with(gvfs_root()) {
+        return true;
+    }
+    // Fallback for non-standard runtimes.
     path.to_string_lossy().contains("/gvfs/")
 }
 
@@ -19,7 +31,22 @@ pub fn ejectable(m: &gio::Mount) -> bool {
     m.can_eject() || m.volume().is_some_and(|v| v.can_eject()) || m.drive().is_some_and(|d| d.is_removable()) || (m.volume().is_none() && m.can_unmount())
 }
 
-/// A password prompt that defaults to "Remember forever" (the keyring), so shares don't ask again.
+/// Strip any password from `smb://user:pass@host/share` -> `smb://user@host/share`.
+/// The full URI (with password) may be used once to connect, but only the
+/// stripped form is stored in settings or shown in the UI.
+pub fn strip_credentials(uri: &str) -> String {
+    let uri = uri.trim();
+    let Some(at) = uri.find('@') else { return uri.to_string() };
+    let Some(scheme_end) = uri.find("://") else { return uri.to_string() };
+    let userinfo = &uri[scheme_end + 3..at];
+    let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
+    if user.is_empty() {
+        return uri.to_string();
+    }
+    format!("{}://{}@{}", &uri[..scheme_end], user, &uri[at + 1..])
+}
+
+/// A password prompt that defaults to session-only so shares don't stay unlocked.
 /// Delete the passwords gvfs saved in the keyring for this server (Secret Service over D-Bus), so the next
 /// connection asks for it again: after the password changed, the stale one would otherwise be tried silently.
 pub fn forget_password(uri: &str) {
@@ -29,6 +56,13 @@ pub fn forget_password(uri: &str) {
     let mut query = std::collections::HashMap::new();
     query.insert("protocol".to_string(), u.scheme().to_string());
     query.insert("server".to_string(), host.to_string());
+    // Narrow to this user so one share doesn't wipe other users' passwords on the host.
+    if let Some(userinfo) = u.userinfo() {
+        let user = userinfo.split_once(':').map_or(userinfo.as_str(), |(u, _)| u);
+        if !user.is_empty() {
+            query.insert("user".to_string(), user.to_string());
+        }
+    }
     let call = |path: &str, iface: &str, method: &str, args: Option<&glib::Variant>| {
         bus.call_sync(Some("org.freedesktop.secrets"), path, iface, method, args, None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>).ok()
     };
@@ -46,7 +80,7 @@ pub fn reconnect(path: PathBuf, done: impl FnOnce(Result<String, String>) + 'sta
     let mount = gio::VolumeMonitor::get().mounts().into_iter().find(|m| m.root().path().is_some_and(|r| path.starts_with(r)));
     let Some(mount) = mount else { return done(Err("the share is not mounted".into())) };
     let uri = mount.root().uri().to_string();
-    mount.unmount_with_operation(gio::MountUnmountFlags::FORCE, None::<&gio::MountOperation>, None::<&gio::Cancellable>, move |res| match res {
+    mount.unmount_with_operation(gio::MountUnmountFlags::NONE, None::<&gio::MountOperation>, None::<&gio::Cancellable>, move |res| match res {
         Ok(()) => {
             forget_password(&uri);
             done(Ok(uri));
@@ -57,7 +91,8 @@ pub fn reconnect(path: PathBuf, done: impl FnOnce(Result<String, String>) + 'sta
 
 fn mount_op(parent: &gtk::Window) -> gtk::MountOperation {
     let op = gtk::MountOperation::new(Some(parent));
-    op.set_password_save(gio::PasswordSave::Permanently);
+    // Session-only by default: the user can still pick "Remember forever" in the dialog.
+    op.set_password_save(gio::PasswordSave::ForSession);
     op
 }
 
@@ -133,6 +168,10 @@ pub fn normalize(uri: &str) -> String {
 }
 
 /// Mount `smb://`, `sftp://`, `ftp://`, `dav://` … through gvfs; passwords go through GTK's dialog and the keyring.
+/// Never pass a URI with `user:password@` here for persistence: use it once to connect,
+/// then remember only `strip_credentials(&uri)`. Enforce SMB2+ and signing in
+/// /etc/samba/smb.conf (`client min protocol = SMB2`, `client signing = mandatory`):
+/// Kolphin inherits gvfs' settings and cannot upgrade a downgraded server itself.
 pub fn connect(parent: &gtk::Window, uri: &str, done: impl FnOnce(Result<Connected, String>) + 'static) {
     let uri = normalize(uri);
     let file = gio::File::for_uri(&uri);
@@ -186,6 +225,15 @@ mod tests {
         assert_eq!(super::server_label("smb://192.168.0.186/HDD-1TB"), "HDD-1TB on 192.168.0.186");
         assert_eq!(super::server_label("sftp://koi@host/home/koi/"), "koi on host");
         assert_eq!(super::server_label("smb://nas/"), "nas");
+        // Passwords never leak into labels.
+        assert_eq!(super::server_label("smb://u:p@nas/share"), "share on nas");
+    }
+
+    #[test]
+    fn strips_passwords() {
+        assert_eq!(super::strip_credentials("smb://u:p@nas/share"), "smb://u@nas/share");
+        assert_eq!(super::strip_credentials("smb://u@nas/share"), "smb://u@nas/share");
+        assert_eq!(super::strip_credentials("smb://nas/share"), "smb://nas/share");
     }
 
     #[test]

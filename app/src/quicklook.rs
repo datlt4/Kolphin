@@ -140,7 +140,17 @@ fn read_text(path: &Path) -> Option<String> {
 }
 
 fn video_frame(path: &Path) -> Option<image::RgbaImage> {
-    let out: PathBuf = std::env::temp_dir().join(format!("kolphin-ql-{}.png", std::process::id()));
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let out: PathBuf = std::env::temp_dir().join(format!(
+        "kolphin-ql-{}-{}-{}.png",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&out).is_err() {
+        return None;
+    }
+    let _ = std::fs::remove_file(&out);
     let ok = std::process::Command::new("ffmpegthumbnailer")
         .arg("-i")
         .arg(path)

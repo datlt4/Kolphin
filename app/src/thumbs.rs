@@ -259,7 +259,20 @@ pub fn orient(img: RgbaImage, o: u32) -> RgbaImage {
 }
 
 fn decode_video(path: &Path, size: u32) -> Option<RgbaImage> {
-    let out = std::env::temp_dir().join(format!("kolphin-thumb-{}-{:?}.png", std::process::id(), std::thread::current().id()));
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Unique per call so two thumbnails can't share / hijack one /tmp file.
+    let out = std::env::temp_dir().join(format!(
+        "kolphin-thumb-{}-{}-{}.png",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    // Claim the name first (O_EXCL): fail if a symlink/file was pre-created.
+    let claimed = std::fs::OpenOptions::new().write(true).create_new(true).open(&out).is_ok();
+    if !claimed {
+        return None;
+    }
+    let _ = std::fs::remove_file(&out);
     let ok = std::process::Command::new("ffmpegthumbnailer")
         .arg("-i")
         .arg(path)

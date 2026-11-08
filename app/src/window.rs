@@ -1225,8 +1225,14 @@ impl Win {
     fn connect_server(self: &Rc<Self>, uri: String) {
         let weak = self.weak();
         let uri = devices::normalize(&uri);
-        let u = uri.clone();
-        self.toasts.add_toast(notify::Toast::new(&format!("Connecting to {uri}…")));
+        // One-time use of an embedded password is allowed, but warn and never store it.
+        let stripped = devices::strip_credentials(&uri);
+        if stripped != uri {
+            self.toasts.add_toast(notify::Toast::new("Password in the address will be used once and never stored. Prefer the password prompt."));
+        }
+        let u = stripped.clone();
+        let display = devices::server_label(&stripped);
+        self.toasts.add_toast(notify::Toast::new(&format!("Connecting to {display}…")));
         devices::connect(self.window.upcast_ref(), &uri, move |res| match res {
             Ok(devices::Connected::Path(p)) => win_open(&weak, Ok(p), Some(u)),
             Ok(devices::Connected::Shares(shares)) => {

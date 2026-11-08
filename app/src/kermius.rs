@@ -44,6 +44,33 @@ fn socket_path() -> PathBuf {
     }
 }
 
+/// Refuse a socket owned by someone else, world-writable, or a symlink: a fake
+/// Kermius could otherwise steal cwd/argv/paths or inject fake cwd events.
+fn socket_ok(p: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(meta) = std::fs::symlink_metadata(p) else { return false };
+    if meta.file_type().is_symlink() {
+        return false;
+    }
+    if meta.uid() != crate::ops::uid() {
+        return false;
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return false;
+    }
+    if let Some(dir) = p.parent() {
+        if let Ok(dm) = std::fs::symlink_metadata(dir) {
+            if dm.file_type().is_symlink() || dm.uid() != crate::ops::uid() {
+                return false;
+            }
+            if dm.permissions().mode() & 0o077 != 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub fn installed() -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("kermius").is_file()))
 }
@@ -92,7 +119,11 @@ impl Kermius {
     }
 
     fn connect(self: &Rc<Self>) -> bool {
-        let Ok(stream) = UnixStream::connect(socket_path()) else { return false };
+        let path = socket_path();
+        if !socket_ok(&path) {
+            return false;
+        }
+        let Ok(stream) = UnixStream::connect(path) else { return false };
         let Ok(reader) = stream.try_clone() else { return false };
         *self.stream.borrow_mut() = Some(stream);
         let (tx, rx) = async_channel::unbounded::<Value>();
