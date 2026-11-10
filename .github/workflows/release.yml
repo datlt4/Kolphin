@@ -48,6 +48,13 @@ jobs:
           export APPIMAGE_EXTRACT_AND_RUN=1 DEPLOY_GTK_VERSION=4 LDAI_OUTPUT="kolphin_${VERSION}_${ARCH}.AppImage"
           ./linuxdeploy-$ARCH.AppImage --appdir AppDir --executable target/release/kolphin \
             --desktop-file assets/kolphin.desktop --icon-file kolphin.png --plugin gtk --output appimage
+      - name: Checksum AppImage
+        if: success()
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for f in kolphin_${VERSION}_*.AppImage; do
+            [ -e "$f" ] && sha256sum "$f" > "${f%.AppImage}.sha256" || true
+          done
       - uses: softprops/action-gh-release@v2
         with:
           files: |

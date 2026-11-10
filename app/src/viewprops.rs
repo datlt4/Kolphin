@@ -87,14 +87,21 @@ pub fn save(dir: &Path, props: ViewProps) {
 }
 
 fn write_secure(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, bytes).is_err() {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let tmp = path.with_extension(format!("{}.{}.{}.tmp", std::process::id(), nanos, N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    // Mode 0600 at creation: no 0644 window where others could read passwords/servers.
+    // No fsync: rename is enough for config files, and this runs on every view change.
+    let wrote = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).and_then(|mut f| f.write_all(bytes));
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&tmp);
         return;
     }
     let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    let _ = std::fs::rename(tmp, path);
+    let _ = std::fs::rename(&tmp, path);
     // Rename keeps the tmp mode; enforce on the final file too (existing file may be 644).
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }

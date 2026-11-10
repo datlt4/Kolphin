@@ -96,7 +96,61 @@ pub fn download(url: &str, progress: impl Fn(u64, u64)) -> Result<PathBuf, Strin
         let _ = std::fs::remove_file(&path);
         return Err("Release file has the wrong format".into());
     }
+    if let Err(e) = verify_sha256(&path, url) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
     Ok(path)
+}
+
+/// Manifest holding `<sha256>  <filename>` for this asset, if CI published one.
+/// `.../kolphin_1.2.3_amd64.deb` -> `.../kolphin_1.2.3_amd64.sha256`.
+fn manifest_url_for(url: &str) -> Option<String> {
+    let base = url.strip_suffix(".deb").or_else(|| url.strip_suffix(".AppImage"))?;
+    Some(format!("{base}.sha256"))
+}
+
+/// Expected hex digest for `filename` inside a `sha256sum` manifest.
+fn parse_sha_manifest(text: &str, filename: &str) -> Option<String> {
+    text.lines().filter_map(|l| {
+        let (hash, name) = l.split_once(char::is_whitespace)?;
+        let name = name.trim_start_matches([' ', '*']).rsplit('/').next().unwrap_or("");
+        (name == filename).then(|| hash.trim().to_lowercase())
+    }).find(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Check the downloaded file against its CI `.sha256` manifest.
+/// The manifest is same-source with the file, so this only guards corruption,
+/// not a compromised release: old releases have no manifest and skip this.
+fn verify_sha256(path: &Path, url: &str) -> Result<(), String> {
+    let Some(manifest_url) = manifest_url_for(url) else { return Ok(()) };
+    let filename = url.rsplit('/').next().unwrap_or("");
+    let resp = ureq::get(&manifest_url).header("User-Agent", "Kolphin").call();
+    let mut resp = match resp {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let mut text = String::new();
+    // Bound the read: a manifest is a few hundred bytes.
+    if resp.body_mut().as_reader().take(64 * 1024).read_to_string(&mut text).is_err() {
+        return Ok(());
+    }
+    let Some(want) = parse_sha_manifest(&text, filename) else {
+        return Err("Release checksum manifest has no entry for this file".into());
+    };
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    (got == want).then_some(()).ok_or_else(|| "Release file failed SHA-256 check".into())
 }
 
 /// Install the download: a new AppImage replaces the running one; a .deb goes in as root (polkit asks for the
@@ -178,5 +232,21 @@ mod tests {
         assert!(super::newer("0.10.0", "0.9.9"));
         assert!(!super::newer("0.1.0", "0.1.0"));
         assert!(!super::newer("0.9.9", "0.10.0"));
+    }
+
+    #[test]
+    fn sha_manifest() {
+        let base = "https://github.com/datlt4/Kolphin/releases/download/v0.16.6";
+        let deb = format!("{base}/kolphin_0.16.6_amd64.deb");
+        let deb_sha = format!("{base}/kolphin_0.16.6_amd64.sha256");
+        assert_eq!(super::manifest_url_for(&deb).as_deref(), Some(deb_sha.as_str()));
+        let img = format!("{base}/kolphin_0.16.6_x86_64.AppImage");
+        let img_sha = format!("{base}/kolphin_0.16.6_x86_64.sha256");
+        assert_eq!(super::manifest_url_for(&img).as_deref(), Some(img_sha.as_str()));
+        assert!(super::manifest_url_for(&format!("{base}/kolphin.tar.gz")).is_none());
+        let text = "abc123  kolphin_0.16.6_amd64.deb\n";
+        assert!(super::parse_sha_manifest(text, "kolphin_0.16.6_amd64.deb").is_none());
+        let good = format!("{}  kolphin_0.16.6_amd64.deb\n", "a".repeat(64));
+        assert_eq!(super::parse_sha_manifest(&good, "kolphin_0.16.6_amd64.deb").as_deref(), Some("a".repeat(64).as_str()));
     }
 }

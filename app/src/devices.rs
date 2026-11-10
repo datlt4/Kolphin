@@ -34,11 +34,18 @@ pub fn ejectable(m: &gio::Mount) -> bool {
 /// Strip any password from `smb://user:pass@host/share` -> `smb://user@host/share`.
 /// The full URI (with password) may be used once to connect, but only the
 /// stripped form is stored in settings or shown in the UI.
+/// Only the authority part (between `://` and the first `/`) is considered,
+/// and the last `@` there splits userinfo from host: passwords or paths
+/// containing `@` elsewhere are left untouched.
 pub fn strip_credentials(uri: &str) -> String {
     let uri = uri.trim();
-    let Some(at) = uri.find('@') else { return uri.to_string() };
     let Some(scheme_end) = uri.find("://") else { return uri.to_string() };
-    let userinfo = &uri[scheme_end + 3..at];
+    let auth_start = scheme_end + 3;
+    let auth_end = uri[auth_start..].find('/').map(|i| auth_start + i).unwrap_or(uri.len());
+    let authority = &uri[auth_start..auth_end];
+    let Some(at_rel) = authority.rfind('@') else { return uri.to_string() };
+    let at = auth_start + at_rel;
+    let userinfo = &uri[auth_start..at];
     let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
     if user.is_empty() {
         return uri.to_string();
@@ -46,7 +53,6 @@ pub fn strip_credentials(uri: &str) -> String {
     format!("{}://{}@{}", &uri[..scheme_end], user, &uri[at + 1..])
 }
 
-/// A password prompt that defaults to session-only so shares don't stay unlocked.
 /// Delete the passwords gvfs saved in the keyring for this server (Secret Service over D-Bus), so the next
 /// connection asks for it again: after the password changed, the stale one would otherwise be tried silently.
 pub fn forget_password(uri: &str) {
@@ -56,13 +62,6 @@ pub fn forget_password(uri: &str) {
     let mut query = std::collections::HashMap::new();
     query.insert("protocol".to_string(), u.scheme().to_string());
     query.insert("server".to_string(), host.to_string());
-    // Narrow to this user so one share doesn't wipe other users' passwords on the host.
-    if let Some(userinfo) = u.userinfo() {
-        let user = userinfo.split_once(':').map_or(userinfo.as_str(), |(u, _)| u);
-        if !user.is_empty() {
-            query.insert("user".to_string(), user.to_string());
-        }
-    }
     let call = |path: &str, iface: &str, method: &str, args: Option<&glib::Variant>| {
         bus.call_sync(Some("org.freedesktop.secrets"), path, iface, method, args, None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>).ok()
     };
@@ -80,7 +79,7 @@ pub fn reconnect(path: PathBuf, done: impl FnOnce(Result<String, String>) + 'sta
     let mount = gio::VolumeMonitor::get().mounts().into_iter().find(|m| m.root().path().is_some_and(|r| path.starts_with(r)));
     let Some(mount) = mount else { return done(Err("the share is not mounted".into())) };
     let uri = mount.root().uri().to_string();
-    mount.unmount_with_operation(gio::MountUnmountFlags::NONE, None::<&gio::MountOperation>, None::<&gio::Cancellable>, move |res| match res {
+    mount.unmount_with_operation(gio::MountUnmountFlags::FORCE, None::<&gio::MountOperation>, None::<&gio::Cancellable>, move |res| match res {
         Ok(()) => {
             forget_password(&uri);
             done(Ok(uri));
@@ -89,10 +88,10 @@ pub fn reconnect(path: PathBuf, done: impl FnOnce(Result<String, String>) + 'sta
     });
 }
 
+/// A password prompt that defaults to "Remember forever" (the keyring), so shares don't ask again.
 fn mount_op(parent: &gtk::Window) -> gtk::MountOperation {
     let op = gtk::MountOperation::new(Some(parent));
-    // Session-only by default: the user can still pick "Remember forever" in the dialog.
-    op.set_password_save(gio::PasswordSave::ForSession);
+    op.set_password_save(gio::PasswordSave::Permanently);
     op
 }
 
@@ -234,6 +233,9 @@ mod tests {
         assert_eq!(super::strip_credentials("smb://u:p@nas/share"), "smb://u@nas/share");
         assert_eq!(super::strip_credentials("smb://u@nas/share"), "smb://u@nas/share");
         assert_eq!(super::strip_credentials("smb://nas/share"), "smb://nas/share");
+        // `@` in the password or in the path must not leak or corrupt.
+        assert_eq!(super::strip_credentials("smb://u:p@ss@h/s"), "smb://u@h/s");
+        assert_eq!(super::strip_credentials("smb://h/dir:x/a@b"), "smb://h/dir:x/a@b");
     }
 
     #[test]
