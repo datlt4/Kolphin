@@ -78,7 +78,7 @@ pub fn run(a: &Action, dir: &Path, selected: &[PathBuf]) -> Result<(), String> {
     let (argv, cwd) = expand(a, dir, selected);
     let Some((prog, args)) = argv.split_first() else { return Err("empty command".into()) };
     if a.terminal {
-        crate::kermius::get().run(argv.clone(), &cwd, &a.name);
+        crate::kermius::get().run(argv.clone(), &cwd);
         return Ok(());
     }
     std::process::Command::new(prog).args(args).current_dir(&cwd).spawn().map(|_| ()).map_err(|e| format!("{prog}: {e}"))

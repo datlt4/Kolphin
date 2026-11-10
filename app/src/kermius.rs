@@ -89,6 +89,39 @@ fn icon_path() -> String {
     p.display().to_string()
 }
 
+/// Tab mark per coding tool (file name, SVG bytes). Brand glyphs are CC0 Simple Icons;
+/// codex.svg is drawn here (no brand asset shipped).
+fn tool_art(prog: &str) -> Option<(&'static str, &'static [u8])> {
+    match prog {
+        "claude" | "claude-code" => Some(("tool-claude.svg", include_bytes!("../../assets/tools/claude.svg"))),
+        "opencode" => Some(("tool-opencode.svg", include_bytes!("../../assets/tools/opencode.svg"))),
+        "codex" | "codex-cli" => Some(("tool-codex.svg", include_bytes!("../../assets/tools/codex.svg"))),
+        _ => None,
+    }
+}
+
+/// Icon for a `session.run` tab: the tool's own mark when known, else Kolphin's logo.
+/// The basename of argv[0] decides (`~/.local/bin/claude` is still Claude).
+fn run_icon(argv: &[String]) -> String {
+    let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_lowercase()).unwrap_or_default();
+    if let Some((file, art)) = tool_art(prog.as_str()) {
+        let p = glib::user_cache_dir().join("kolphin").join(file);
+        if !p.exists() {
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            let _ = std::fs::write(&p, art);
+        }
+        if p.is_file() {
+            return p.display().to_string();
+        }
+    }
+    icon_path()
+}
+
+/// Title for a `session.run` tab: just the folder (the icon already says which tool).
+fn run_title(cwd: &Path) -> String {
+    cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())
+}
+
 impl Kermius {
     /// Run `f(true)` once connected (starting Kermius in the background if needed), or `f(false)`.
     fn ensure(self: &Rc<Self>, f: impl FnOnce(bool) + 'static) {
@@ -226,15 +259,15 @@ impl Kermius {
         });
     }
 
-    /// A new tab running `argv` in `cwd` (Claude, OpenCode, …).
-    pub fn run(self: &Rc<Self>, argv: Vec<String>, cwd: &Path, title: &str) {
-        let (cwd, title) = (cwd.to_path_buf(), title.to_string());
+    /// A new tab running `argv` in `cwd` (Claude, OpenCode, …): titled with the folder, badged with the tool.
+    pub fn run(self: &Rc<Self>, argv: Vec<String>, cwd: &Path) {
+        let (cwd, title, icon) = (cwd.to_path_buf(), run_title(cwd), run_icon(&argv));
         let me = self.clone();
         self.ensure(move |ok| {
             if !ok {
                 return fallback_terminal(&cwd, Some(&argv));
             }
-            let params = json!({"argv": argv, "cwd": cwd, "title": title, "icon": icon_path(), "focus": true});
+            let params = json!({"argv": argv, "cwd": cwd, "title": title, "icon": icon, "focus": true});
             me.call("session.run", params, move |r| {
                 if r.is_err() {
                     fallback_terminal(&cwd, Some(&argv));
@@ -270,5 +303,30 @@ fn fallback_terminal(cwd: &Path, argv: Option<&[String]>) {
     let r = std::process::Command::new("gnome-terminal").arg(format!("--working-directory={}", cwd.display())).args(["--", "bash", "-c", &script]).spawn();
     if r.is_err() {
         let _ = std::process::Command::new("x-terminal-emulator").current_dir(cwd).args(["-e", "bash", "-c", &script]).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_marks() {
+        assert!(tool_art("claude").is_some());
+        assert!(tool_art("claude-code").is_some());
+        assert!(tool_art("opencode").is_some());
+        assert!(tool_art("codex").is_some());
+        assert!(tool_art("codex-cli").is_some());
+        assert!(tool_art("vim").is_none());
+        for (_, art) in ["claude", "opencode", "codex"].iter().filter_map(|t| tool_art(t)) {
+            assert!(!art.is_empty());
+        }
+    }
+
+    #[test]
+    fn run_tabs_show_folders() {
+        assert_eq!(run_title(Path::new("/home/koi/Kolphin")), "Kolphin");
+        assert_eq!(run_title(Path::new("/")), "/");
+        assert_eq!(run_title(Path::new("proj")), "proj");
     }
 }
