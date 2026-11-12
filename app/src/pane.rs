@@ -89,7 +89,7 @@ impl Pane {
         status_bar.append(&status);
         status_bar.append(&gtk::Image::from_icon_name("zoom-out-symbolic"));
         status_bar.append(&slider);
-        let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text or pattern like *.jpg").hexpand(true).build();
+        let filter = gtk::SearchEntry::builder().placeholder_text("Filter — text, *.jpg, or tag:Red with Subfolders").hexpand(true).build();
         crate::dialogs::ime_safe(&filter);
         let subfolders = gtk::ToggleButton::builder().label("Subfolders").tooltip_text("Search this folder and everything below it").build();
         let filter_row = gtk::Box::builder().spacing(6).build();
@@ -371,6 +371,14 @@ impl Pane {
         self.filter.grab_focus();
     }
 
+    /// Sidebar TAGS: recursive tag search prefilled as `tag:<name>` (typing it in Ctrl+F does the same).
+    pub fn start_tag_search(self: &Rc<Self>, name: &str) {
+        self.subfolders.set_active(true);
+        self.filter_bar.set_reveal_child(true);
+        self.filter.set_text(&format!("tag:{name}"));
+        self.canvas.grab_focus();
+    }
+
     fn close_filter(self: &Rc<Self>) {
         if self.searching.get() {
             self.load();
@@ -381,10 +389,14 @@ impl Pane {
     }
 
     /// The filter text: narrows this folder, or with Subfolders on searches below it (2+ characters).
+    /// `tag:Red` (Subfolders on) searches tag assignments instead of names.
     fn apply_filter(self: &Rc<Self>, text: String) {
         // Input methods commit words with a trailing space.
         let text = text.trim().to_string();
         if self.subfolders.is_active() && text.chars().count() >= 2 {
+            if let Some(tag) = text.strip_prefix("tag:").map(str::trim).filter(|t| !t.is_empty()) {
+                return self.search_tag(tag.to_string());
+            }
             return self.search(text);
         }
         if self.searching.get() {
@@ -398,6 +410,50 @@ impl Pane {
         self.canvas.update(|m| {
             m.filter = text;
             m.rebuild_order();
+        });
+    }
+
+    /// Recursive tag search from this folder (by tag name or id); results are named by relative path.
+    fn search_tag(self: &Rc<Self>, query: String) {
+        let lower = query.to_lowercase();
+        let ids: Vec<String> = crate::tags::defs()
+            .into_iter()
+            .filter(|t| t.name.to_lowercase().contains(&lower) || t.id == lower)
+            .map(|t| t.id)
+            .collect();
+        if ids.is_empty() {
+            self.searching.set(false);
+            self.status.set_text(&format!("No tag matches “{query}”"));
+            return;
+        }
+        let generation = self.generation.get() + 1;
+        self.generation.set(generation);
+        self.searching.set(true);
+        self.monitor.take();
+        let show_hidden = self.canvas.model().show_hidden;
+        self.canvas.reset(show_hidden);
+        self.loading.set(true);
+        self.status.set_text("Searching tags…");
+        let (tx, rx) = async_channel::bounded(16);
+        let root = self.path();
+        std::thread::spawn(move || crate::search::run_tag(root, ids, show_hidden, tx));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(msg) = rx.recv().await {
+                let Some(pane) = weak.upgrade() else { return };
+                if pane.generation.get() != generation {
+                    return;
+                }
+                match msg {
+                    Msg::Entries(batch) => pane.canvas.update(|m| m.append(batch)),
+                    Msg::Done => {
+                        pane.loading.set(false);
+                        pane.update_status();
+                        pane.refresh_tags(None);
+                    }
+                    _ => {}
+                }
+            }
         });
     }
 
@@ -732,6 +788,34 @@ impl Pane {
                 }
             }
             section(&[("Compress…", "win.compress"), ("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
+            // Tags: one row per tag (✓ when every selected item has it), then manage entries.
+            let tags = gio::Menu::new();
+            let defs = crate::tags::defs();
+            let mut have: Option<std::collections::HashSet<String>> = None;
+            for p in &selected {
+                let t: std::collections::HashSet<String> = p.file_name().map(|n| {
+                    let m = self.canvas.model();
+                    m.entries.iter().find(|e| e.name.as_ref() == n).map_or(Vec::new(), |e| e.tags.clone())
+                }).unwrap_or_default().into_iter().collect();
+                have = Some(match have {
+                    None => t,
+                    Some(a) => a.intersection(&t).cloned().collect(),
+                });
+            }
+            let have = have.unwrap_or_default();
+            for t in &defs {
+                let label = format!("{} {}", if have.contains(&t.id) { "✓" } else { "○" }, t.name);
+                let item = gio::MenuItem::new(Some(&label), None);
+                item.set_action_and_target_value(Some("win.toggle-tag"), Some(&t.id.to_variant()));
+                tags.append_item(&item);
+            }
+            let manage = gio::Menu::new();
+            manage.append(Some("New Tag…"), Some("win.new-tag"));
+            if defs.iter().any(|t| crate::tags::is_custom(&t.id)) {
+                manage.append(Some("Remove Tag…"), Some("win.remove-tag"));
+            }
+            tags.append_section(None, &manage);
+            menu.append_submenu(Some("Tags"), &tags);
             section(&[("Change Icon…", "win.change-icon"), ("Reset Icon", "win.reset-icon")]);
             section(&[("Properties (Alt+Enter)", "win.properties")]);
         } else {
@@ -888,6 +972,12 @@ impl Pane {
             })
             .collect();
         added.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        // New files keep their tags (fresh xattrs, e.g. after a toggle elsewhere).
+        if !crate::devices::is_remote(&dir) {
+            for e in &mut added {
+                e.tags = crate::tags::tags_for(&dir, &e.name);
+            }
+        }
         self.canvas.update(|m| {
             m.remove_names(&deleted);
             m.append(added);
@@ -895,11 +985,54 @@ impl Pane {
         self.try_select_pending();
         self.read_dims();
         self.refresh_git();
+        self.canvas.refresh_has_tags();
     }
 
     fn after_load(self: &Rc<Self>) {
         self.read_dims();
         self.refresh_git();
+        self.refresh_tags(None);
+    }
+
+    /// Tag assignments for the shown entries (xattr; skipped on network shares), off the UI thread.
+    pub fn refresh_tags(self: &Rc<Self>, only: Option<std::collections::HashSet<OsString>>) {
+        if crate::devices::is_remote(&self.path()) {
+            self.canvas.set_tags(crate::tags::color_map(), false);
+            return;
+        }
+        let dir = self.path();
+        let names: Vec<OsString> = {
+            let m = self.canvas.model();
+            m.entries.iter().filter(|e| !e.deleted && only.as_ref().is_none_or(|s| s.contains(e.name.as_ref()))).map(|e| e.name.to_os_string()).collect()
+        };
+        if names.is_empty() {
+            return;
+        }
+        let (tx, rx) = async_channel::unbounded::<Vec<(OsString, Vec<String>)>>();
+        std::thread::spawn(move || {
+            let mut out = Vec::with_capacity(names.len());
+            for n in names {
+                out.push((n.clone(), crate::tags::tags_for(&dir, &n)));
+            }
+            let _ = tx.send_blocking(out);
+        });
+        let (weak, generation) = (Rc::downgrade(self), self.generation.get());
+        glib::spawn_future_local(async move {
+            let Ok(batch) = rx.recv().await else { return };
+            let Some(pane) = weak.upgrade() else { return };
+            if pane.generation.get() != generation {
+                return;
+            }
+            let has = batch.iter().any(|(_, t)| !t.is_empty());
+            pane.canvas.update(|m| {
+                for (name, tags) in batch {
+                    if let Some(i) = m.entries.iter().position(|e| e.name.to_os_string() == name) {
+                        m.entries[i].tags = tags;
+                    }
+                }
+            });
+            pane.canvas.set_tags(crate::tags::color_map(), has || pane.canvas.model().entries.iter().any(|e| !e.tags.is_empty()));
+        });
     }
 
     /// Git badges for this folder, computed off the UI thread.

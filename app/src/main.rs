@@ -22,6 +22,7 @@ mod shelf;
 mod quicklook;
 mod search;
 mod stats;
+mod tags;
 mod thumbs;
 mod update;
 mod viewprops;
