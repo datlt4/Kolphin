@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "kolphin"
-version = "0.16.10"
+version = "0.16.11"
 dependencies = [
  "async-channel",
  "flate2",

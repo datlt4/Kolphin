@@ -143,14 +143,43 @@ fn icons_file() -> PathBuf {
 fn with_icons<T>(f: impl FnOnce(&mut HashMap<PathBuf, String>) -> T) -> T {
     ICONS.with(|s| {
         let mut s = s.borrow_mut();
-        let map = s.get_or_insert_with(|| std::fs::read(icons_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
+        let map = s.get_or_insert_with(|| {
+            let map: HashMap<PathBuf, String> = std::fs::read(icons_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            if settings()["icons_by_real_path"].as_bool() == Some(true) {
+                return map;
+            }
+            // Once: move entries saved under a symlinked path to the real file (its own entry wins).
+            let mut out: HashMap<PathBuf, String> = HashMap::new();
+            for (k, v) in map {
+                let real = icon_key(&k);
+                if real == k || !out.contains_key(&real) {
+                    out.insert(real, v);
+                }
+            }
+            if let Ok(json) = serde_json::to_vec(&out) {
+                write_secure(&icons_file(), &json);
+            }
+            let mut v = settings();
+            v["icons_by_real_path"] = true.into();
+            write_settings(&v);
+            out
+        });
         f(map)
     })
 }
 
+/// Custom icons follow the real file: ~/Downloads/x and /mnt/data/Downloads/x share one entry
+/// (network shares as given).
+fn icon_key(path: &Path) -> PathBuf {
+    if crate::devices::is_remote(path) {
+        return path.to_path_buf();
+    }
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Material icon chosen by the user for this file or folder.
 pub fn custom_icon(path: &Path) -> Option<String> {
-    with_icons(|m| if m.is_empty() { None } else { m.get(path).cloned() })
+    with_icons(|m| if m.is_empty() { None } else { m.get(&icon_key(path)).cloned() })
 }
 
 pub fn has_custom_icons() -> bool {
@@ -160,9 +189,10 @@ pub fn has_custom_icons() -> bool {
 pub fn set_custom_icon(paths: &[PathBuf], icon: Option<&str>) {
     let json = with_icons(|m| {
         for p in paths {
+            let real = icon_key(p);
             match icon {
-                Some(i) => m.insert(p.clone(), i.to_string()),
-                None => m.remove(p),
+                Some(i) => m.insert(real, i.to_string()),
+                None => m.remove(&real),
             };
         }
         serde_json::to_vec(m).ok()
@@ -260,6 +290,8 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
         assert_eq!(super::key(&d.join("link")), super::key(&real));
+        std::fs::write(real.join("f.txt"), "x").unwrap();
+        assert_eq!(super::icon_key(&d.join("link/f.txt")), super::icon_key(&real.join("f.txt")));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
