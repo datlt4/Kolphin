@@ -1,6 +1,6 @@
 //! Drop Shelf (like Dropover): shake the pointer while dragging and a floating shelf appears next to it; drop files
 //! there, keep working, drag them out later. X11 watches the pointer globally; everywhere there is Ctrl+Shift+D.
-use crate::{icons, thumbs};
+use crate::{icons, thumbs, viewprops};
 use gtk::{cairo, gdk, gio, glib, prelude::*};
 use image::RgbaImage;
 use std::cell::{Cell, RefCell};
@@ -68,8 +68,7 @@ fn drag_out(widget: &impl IsA<gtk::Widget>, shelf: &Rc<Shelf>, paths: impl Fn(&S
             let s = weak.upgrade()?;
             let items = paths(&s);
             let first = items.first()?;
-            let name = first.file_name().unwrap_or_default().to_string_lossy();
-            if let Some(tex) = icons::texture(icons::icon_name(&name, first.is_dir()), 64) {
+            if let Some(tex) = icon_texture(first, 64) {
                 src.set_icon(Some(&tex), 32, 32);
             }
             let content = uri_list(&items);
@@ -203,7 +202,7 @@ impl Shelf {
             let (Some(p), Some(row)) = (s.path_at(item), item.child()) else { return };
             let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
             if let Some(img) = row.first_child().and_downcast::<gtk::Image>() {
-                img.set_paintable(icons::texture(icons::icon_name(&name, p.is_dir()), 48).as_ref());
+                img.set_paintable(icon_texture(&p, 48).as_ref());
             }
             if let Some(label) = row.first_child().and_then(|c| c.next_sibling()).and_downcast::<gtk::Label>() {
                 label.set_text(&name);
@@ -307,7 +306,7 @@ impl Shelf {
                 continue;
             }
             let name = p.file_name().unwrap_or_default().to_string_lossy();
-            if let Some(s) = icons::texture(icons::icon_name(&name, p.is_dir()), 128).and_then(|t| texture_surface(&t)) {
+            if let Some(s) = icon_texture(p, 128).and_then(|t| texture_surface(&t)) {
                 pics.insert(p.clone(), s);
             }
             if let Some(kind) = thumbs::kind(&name) {
@@ -441,6 +440,17 @@ fn rounded(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.arc(x + r, y + h - r, r, PI / 2.0, PI);
     cr.arc(x + r, y + r, r, PI, 1.5 * PI);
     cr.close_path();
+}
+
+/// Item picture: the user's custom icon (Change Icon…) when set, else the file-type icon.
+fn icon_texture(p: &std::path::Path, px: u32) -> Option<gdk::Texture> {
+    if let Some(found) = viewprops::custom_icon(p).and_then(|c| icons::find(&c)) {
+        if let Some(tex) = icons::texture(found, px) {
+            return Some(tex);
+        }
+    }
+    let name = p.file_name().unwrap_or_default().to_string_lossy();
+    icons::texture(icons::icon_name(&name, p.is_dir()), px)
 }
 
 fn texture_surface(tex: &gdk::Texture) -> Option<cairo::ImageSurface> {
