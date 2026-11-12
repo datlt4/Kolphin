@@ -34,14 +34,6 @@ pub enum Action {
 
 type ActionHandler = Box<dyn Fn(Action)>;
 
-/// One tag dot: a filled disc.
-fn dot(snap: &gtk::Snapshot, rect: &dyn Fn(f64, f64, f64, f64) -> graphene::Rect, x: f64, y: f64, r: f64, c: &gdk::RGBA) {
-    let shape = gsk::RoundedRect::from_rect(rect(x - r, y - r, 2.0 * r, 2.0 * r), r as f32);
-    snap.push_rounded_clip(&shape);
-    snap.append_color(c, &rect(x - r, y - r, 2.0 * r, 2.0 * r));
-    snap.pop();
-}
-
 const HEADER_H: f64 = 28.0;
 /// List modes: icon's left edge in its row (room for the selection checkbox before it).
 const LIST_ICON_X: f64 = 24.0;
@@ -49,10 +41,6 @@ const GROUP_H: f64 = 38.0;
 const SIZE_W: f64 = 100.0;
 const DATE_W: f64 = 150.0;
 const TYPE_W: f64 = 160.0;
-/// Tag dots in Compact/Details: a fixed gutter when any shown entry has tags.
-const TAG_DOT_R: f64 = 3.0;
-const TAG_DOT_GAP: f64 = 3.0;
-const TAG_SLOT: f64 = crate::tags::MAX_DOTS as f64 * (2.0 * TAG_DOT_R + TAG_DOT_GAP);
 
 /// A drop moves (no key, or Shift); with Ctrl held it copies. Over X11 the key state is not passed on, but the
 /// dragging side narrows its offer to MOVE (Shift) or COPY (Ctrl).
@@ -250,8 +238,6 @@ mod imp {
         pub thumb_requested: Cell<bool>,
         pub dir: RefCell<std::path::PathBuf>,
         pub git: RefCell<std::collections::HashMap<std::ffi::OsString, char>>,
-        pub tag_colors: RefCell<std::collections::HashMap<String, (f64, f64, f64)>>,
-        pub has_tags: Cell<bool>,
     }
 
     impl Default for Canvas {
@@ -285,8 +271,6 @@ mod imp {
                 thumb_requested: Default::default(),
                 dir: Default::default(),
                 git: Default::default(),
-                tag_colors: Default::default(),
-                has_tags: Default::default(),
             }
         }
     }
@@ -621,10 +605,9 @@ impl Canvas {
 
     fn text_for(&self, idx: u32, g: &Geometry, details_name_w: f64) -> Ref<'_, Text> {
         let imp = self.imp();
-        let slot = (self.mode() != ViewMode::Icons && imp.has_tags.get()).then_some(TAG_SLOT + 4.0).unwrap_or(0.0);
         let width = match self.mode() {
             ViewMode::Icons => g.card_w - 12.0,
-            ViewMode::Compact => g.cell_w - g.icon - LIST_ICON_X - 20.0 - slot,
+            ViewMode::Compact => g.cell_w - g.icon - LIST_ICON_X - 20.0,
             ViewMode::Details => details_name_w,
         };
         if imp.text_width.get() != width {
@@ -694,9 +677,7 @@ impl Canvas {
         let type_x = w - TYPE_W - 8.0;
         let date_x = type_x - DATE_W;
         let size_x = date_x - SIZE_W;
-        let dots_x0 = LIST_ICON_X + g.icon + 8.0;
-        let slot = (self.mode() != ViewMode::Icons && imp.has_tags.get()).then_some(TAG_SLOT + 4.0).unwrap_or(0.0);
-        let name_x = dots_x0 + slot;
+        let name_x = LIST_ICON_X + g.icon + 8.0;
         let name_w = (size_x - name_x - 8.0).max(40.0);
 
         snap.push_clip(&rect(0.0, 0.0, w, h));
@@ -712,7 +693,7 @@ impl Canvas {
                 let g = imp.git.borrow();
                 if g.is_empty() { None } else { g.get(m.entries[m.order[p] as usize].name.as_ref()).copied() }
             };
-            let (idx, selected, icon, symlink, nlink, tags) = {
+            let (idx, selected, icon, symlink, nlink) = {
                 let m = self.model();
                 let idx = m.order[p];
                 let e = &m.entries[idx as usize];
@@ -721,7 +702,7 @@ impl Canvas {
                     .and_then(|d| crate::viewprops::custom_icon(&d.join(&*e.name)))
                     .and_then(|c| icons::find(&c))
                     .unwrap_or_else(|| icons::icon_name(&e.name.to_string_lossy(), e.is_dir));
-                (idx, m.selected[idx as usize], icon, e.symlink, if e.is_dir { 1 } else { e.nlink }, e.tags.clone())
+                (idx, m.selected[idx as usize], icon, e.symlink, if e.is_dir { 1 } else { e.nlink })
             };
             let thumb = match imp.thumbs.borrow().get(&idx) {
                 Some(Thumb::Ready(_, tex)) => Some(tex.clone()),
@@ -811,20 +792,6 @@ impl Canvas {
                 snap.append_layout(&l, &color);
                 snap.restore();
             }
-            // Tag dots: overlaid bottom-center on the icon in Icons mode.
-            if self.mode() == ViewMode::Icons && !tags.is_empty() {
-                let colors = imp.tag_colors.borrow();
-                let n = tags.len().min(crate::tags::MAX_DOTS);
-                let step = 2.0 * TAG_DOT_R + TAG_DOT_GAP;
-                let mut dx = ix + (g.icon - (n as f64 * step - TAG_DOT_GAP)) / 2.0 + TAG_DOT_R;
-                let dy = iy + g.icon - TAG_DOT_R - 2.0;
-                for id in tags.iter().take(n) {
-                    let (r, gg, b) = colors.get(id).copied().unwrap_or((0.55, 0.57, 0.6));
-                    dot(snap, &rect, dx, dy, TAG_DOT_R + 1.0, &gdk::RGBA::new(0.08, 0.09, 0.11, 0.9));
-                    dot(snap, &rect, dx, dy, TAG_DOT_R, &gdk::RGBA::new(r as f32, gg as f32, b as f32, 1.0));
-                    dx += step;
-                }
-            }
             // Hard links: a dark ×N chip on the bottom-left.
             for (text, right) in [((nlink > 1).then(|| format!("×{nlink}")), false)] {
                 let Some(text) = text else { continue };
@@ -856,26 +823,13 @@ impl Canvas {
             let th = text.name.pixel_size().1 as f64;
             let (tx, ty) = match self.mode() {
                 ViewMode::Icons => (bx + 6.0, y + 10.0 + g.icon + 6.0),
-                ViewMode::Compact => (x + LIST_ICON_X + g.icon + 8.0 + slot, y + (g.cell_h - th) / 2.0),
+                ViewMode::Compact => (x + LIST_ICON_X + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
                 ViewMode::Details => (name_x, y + (g.cell_h - th) / 2.0),
             };
             snap.save();
             snap.translate(&graphene::Point::new(tx as f32, ty as f32));
             snap.append_layout(&text.name, &fg);
             snap.restore();
-            // Tag dots in the gutter left of the name in list modes.
-            if slot > 0.0 && !tags.is_empty() {
-                let colors = imp.tag_colors.borrow();
-                let n = tags.len().min(crate::tags::MAX_DOTS);
-                let step = 2.0 * TAG_DOT_R + TAG_DOT_GAP;
-                let mut dx = dots_x0 + TAG_DOT_R;
-                let dy = y + g.cell_h / 2.0;
-                for id in tags.iter().take(n) {
-                    let (r, gg, b) = colors.get(id).copied().unwrap_or((0.55, 0.57, 0.6));
-                    dot(snap, &rect, dx, dy, TAG_DOT_R, &gdk::RGBA::new(r as f32, gg as f32, b as f32, 1.0));
-                    dx += step;
-                }
-            }
             if let Some(cols) = &text.columns {
                 let dim = muted;
                 for (layout, cx) in cols.iter().zip([size_x, date_x + 12.0, type_x + 8.0]) {
@@ -1058,29 +1012,6 @@ impl Canvas {
     /// Git status letters for the shown entries (empty outside a repository).
     pub fn set_git(&self, map: std::collections::HashMap<std::ffi::OsString, char>) {
         *self.imp().git.borrow_mut() = map;
-        self.queue_draw();
-    }
-
-    /// Tag colors by id, and whether any shown entry has tags (for the list-mode gutter).
-    pub fn set_tags(&self, colors: std::collections::HashMap<String, (f64, f64, f64)>, has_tags: bool) {
-        let imp = self.imp();
-        *imp.tag_colors.borrow_mut() = colors;
-        if imp.has_tags.get() != has_tags {
-            // The name width changes with the gutter: drop cached layouts.
-            imp.texts.borrow_mut().clear();
-        }
-        imp.has_tags.set(has_tags);
-        self.queue_draw();
-    }
-
-    /// Recompute whether any entry has tags (after in-place tag edits), keeping the colors.
-    pub fn refresh_has_tags(&self) {
-        let has = self.model().entries.iter().any(|e| !e.tags.is_empty());
-        let imp = self.imp();
-        if imp.has_tags.get() != has {
-            imp.texts.borrow_mut().clear();
-        }
-        imp.has_tags.set(has);
         self.queue_draw();
     }
 

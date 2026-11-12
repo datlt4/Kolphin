@@ -470,28 +470,19 @@ fn keep_permissions(dst: &Path, meta: &std::fs::Metadata) {
     let _ = std::fs::set_permissions(dst, meta.permissions());
 }
 
-/// Copy a file or folder, keeping its tags (symlinks stay links: the new link shows the target's tags).
-/// `on_bytes` returns false to cancel. `on_bytes(copied, verified)` reports progress; false stops the copy.
+/// Copy a file or folder (symlinks stay links); `on_bytes` returns false to cancel.
+/// `on_bytes(copied, verified)` reports progress; false stops the copy.
 fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64, u64) -> bool) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
-        return std::os::unix::fs::symlink(std::fs::read_link(src)?, dst);
-    }
-    // Tags ride along (best effort: no xattr on FAT/NTFS); a rename-move keeps them by itself.
-    let tags = crate::tags::own(src);
-    let keep_tags = |dst: &Path| {
-        if !tags.is_empty() {
-            let _ = crate::tags::set(dst, &tags);
-        }
-    };
-    if meta.is_dir() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+    } else if meta.is_dir() {
         std::fs::create_dir(dst)?;
         for e in std::fs::read_dir(src)? {
             let e = e?;
             copy_tree(&e.path(), &dst.join(e.file_name()), verify, on_bytes)?;
         }
         keep_permissions(dst, &meta);
-        keep_tags(dst);
         Ok(())
     } else {
         let (mut r, mut w) = (std::fs::File::open(src)?, std::fs::File::create(dst)?);
@@ -533,7 +524,6 @@ fn copy_tree(src: &Path, dst: &Path, verify: bool, on_bytes: &mut dyn FnMut(u64,
             }
         }
         keep_permissions(dst, &meta);
-        keep_tags(dst);
         Ok(())
     }
 }
@@ -628,22 +618,6 @@ mod tests {
         let links = make_links(std::slice::from_ref(&renamed), true).unwrap();
         assert_eq!(links[0].file_name().unwrap(), "h (link).txt");
         assert!(new_folder(&b, "x/y").is_err());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn copies_keep_tags() {
-        let root = std::env::temp_dir().join(format!("kolphin-tagcopy-{}", std::process::id()));
-        let (a, b) = (root.join("a"), root.join("b"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join("f.txt"), "x").unwrap();
-        if crate::tags::set(&a.join("f.txt"), &["red".into()]).is_err() {
-            std::fs::remove_dir_all(&root).unwrap();
-            return; // no xattr support: nothing to check.
-        }
-        wait(transfer_keep(vec![a.join("f.txt")], b.clone(), false)).unwrap();
-        assert_eq!(crate::tags::own(&b.join("f.txt")), ["red"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

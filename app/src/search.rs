@@ -19,43 +19,16 @@ struct Queue {
     busy: usize,
 }
 
-/// What a recursive walk looks for: a name, or tag ids.
-#[derive(Clone)]
-pub enum Want {
-    Name(String),
-    Tags(Vec<String>),
-}
-
-fn want_matches(want: &Want, path: &Path, name: &str) -> bool {
-    match want {
-        Want::Name(q) => matches(q, name),
-        // A symlink counts as tagged when its target is (mirrors the item dots).
-        Want::Tags(ids) => match (path.parent(), path.file_name()) {
-            (Some(d), Some(n)) => crate::tags::tags_for(d, &n.to_os_string()).iter().any(|t| ids.contains(t)),
-            _ => false,
-        },
-    }
-}
-
 /// Walk `root` for names matching `query`; entries are named by their path relative to `root`.
 pub fn run(root: PathBuf, query: String, show_hidden: bool, tx: async_channel::Sender<Msg>) {
-    run_with(root, Want::Name(query), show_hidden, tx);
-}
-
-/// Walk `root` for entries carrying any of `ids`; entries are named by their path relative to `root`.
-pub fn run_tag(root: PathBuf, ids: Vec<String>, show_hidden: bool, tx: async_channel::Sender<Msg>) {
-    run_with(root, Want::Tags(ids), show_hidden, tx);
-}
-
-fn run_with(root: PathBuf, want: Want, show_hidden: bool, tx: async_channel::Sender<Msg>) {
     let dev = std::fs::metadata(&root).map(|m| m.dev()).unwrap_or(0);
     let threads = if crate::thumbs::rotational(dev) { 2 } else { std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8) };
     let shared = Arc::new((Mutex::new(Queue { dirs: vec![root.clone()], busy: 0 }), Condvar::new()));
     let found = Arc::new(Mutex::new(Vec::<Entry>::new()));
     let workers: Vec<_> = (0..threads)
         .map(|_| {
-            let (shared, found, root, want, tx) = (shared.clone(), found.clone(), root.clone(), want.clone(), tx.clone());
-            std::thread::spawn(move || worker(&shared, &found, &root, &want, show_hidden, &tx))
+            let (shared, found, root, query, tx) = (shared.clone(), found.clone(), root.clone(), query.clone(), tx.clone());
+            std::thread::spawn(move || worker(&shared, &found, &root, &query, show_hidden, &tx))
         })
         .collect();
     // Flush matches every 150 ms while the walkers run.
@@ -79,7 +52,7 @@ fn run_with(root: PathBuf, want: Want, show_hidden: bool, tx: async_channel::Sen
     let _ = tx.send_blocking(Msg::Done);
 }
 
-fn worker(shared: &(Mutex<Queue>, Condvar), found: &Mutex<Vec<Entry>>, root: &Path, want: &Want, show_hidden: bool, tx: &async_channel::Sender<Msg>) {
+fn worker(shared: &(Mutex<Queue>, Condvar), found: &Mutex<Vec<Entry>>, root: &Path, query: &str, show_hidden: bool, tx: &async_channel::Sender<Msg>) {
     let (q, cv) = shared;
     loop {
         let dir = {
@@ -112,8 +85,8 @@ fn worker(shared: &(Mutex<Queue>, Condvar), found: &Mutex<Vec<Entry>>, root: &Pa
                 if is_dir {
                     subdirs.push(e.path());
                 }
-                let path = e.path();
-                if want_matches(want, &path, &s) {
+                if matches(query, &s) {
+                    let path = e.path();
                     let rel = path.strip_prefix(root).unwrap_or(&path).as_os_str().to_os_string();
                     let mut entry = Entry::new(rel, is_dir || (ft.is_some_and(|t| t.is_symlink()) && path.is_dir()));
                     entry.symlink = ft.is_some_and(|t| t.is_symlink());
@@ -134,19 +107,6 @@ fn worker(shared: &(Mutex<Queue>, Condvar), found: &Mutex<Vec<Entry>>, root: &Pa
 mod tests {
     use super::*;
 
-    fn collect(rx: &async_channel::Receiver<Msg>) -> Vec<String> {
-        let mut names = Vec::new();
-        while let Ok(m) = rx.recv_blocking() {
-            match m {
-                Msg::Entries(b) => names.extend(b.into_iter().map(|e| e.name.to_string_lossy().into_owned())),
-                Msg::Done => break,
-                _ => {}
-            }
-        }
-        names.sort();
-        names
-    }
-
     #[test]
     fn finds_nested_matches() {
         let root = std::env::temp_dir().join(format!("kolphin-search-{}", std::process::id()));
@@ -157,28 +117,17 @@ mod tests {
         }
         let (tx, rx) = async_channel::unbounded();
         run(root.clone(), "cat".into(), false, tx);
-        assert_eq!(collect(&rx), ["a/b/c/catalog.txt", "a/b/cat.png", "cat.jpg"]);
-        assert!(matches("*.JPG", "dog.jpg") && !matches("*.png", "dog.jpg"));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn finds_tagged() {
-        let root = std::env::temp_dir().join(format!("kolphin-search-tag-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("red.txt"), "x").unwrap();
-        std::fs::write(root.join("sub/blue.txt"), "x").unwrap();
-        std::fs::write(root.join("plain.txt"), "x").unwrap();
-        if crate::tags::set(&root.join("red.txt"), &["red".into()]).is_err() || crate::tags::set(&root.join("sub/blue.txt"), &["blue".into()]).is_err() {
-            std::fs::remove_dir_all(&root).unwrap();
-            return; // no xattr support: nothing to check.
+        let mut names = Vec::new();
+        while let Ok(m) = rx.recv_blocking() {
+            match m {
+                Msg::Entries(b) => names.extend(b.into_iter().map(|e| e.name.to_string_lossy().into_owned())),
+                Msg::Done => break,
+                _ => {}
+            }
         }
-        let (tx, rx) = async_channel::unbounded();
-        run_tag(root.clone(), vec!["red".into()], false, tx);
-        assert_eq!(collect(&rx), ["red.txt"]);
-        let (tx, rx) = async_channel::unbounded();
-        run_tag(root.clone(), vec!["red".into(), "blue".into()], false, tx);
-        assert_eq!(collect(&rx), ["red.txt", "sub/blue.txt"]);
+        names.sort();
+        assert_eq!(names, ["a/b/c/catalog.txt", "a/b/cat.png", "cat.jpg"]);
+        assert!(matches("*.JPG", "dog.jpg") && !matches("*.png", "dog.jpg"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

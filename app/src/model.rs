@@ -20,8 +20,6 @@ pub struct Entry {
     pub symlink: bool,
     /// Hard links to this file (1 = none besides itself).
     pub nlink: u32,
-    /// Tag ids from `user.kolphin.tags` (symlinks show their target's too).
-    pub tags: Vec<String>,
     /// Image size: None = not read yet, Some(None) = not an image or unreadable.
     pub dims: Option<Option<(u32, u32)>>,
 }
@@ -29,7 +27,7 @@ pub struct Entry {
 impl Entry {
     pub fn new(name: OsString, is_dir: bool) -> Self {
         let key = sort_key(&name.to_string_lossy(), is_dir);
-        Entry { name: name.into_boxed_os_str(), key, is_dir, deleted: false, size: UNKNOWN_SIZE, mtime: UNKNOWN_TIME, symlink: false, nlink: 1, dims: None, tags: Vec::new() }
+        Entry { name: name.into_boxed_os_str(), key, is_dir, deleted: false, size: UNKNOWN_SIZE, mtime: UNKNOWN_TIME, symlink: false, nlink: 1, dims: None }
     }
 
     pub fn hidden(&self) -> bool {

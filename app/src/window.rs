@@ -867,73 +867,6 @@ impl Win {
             }
         });
         self.window.add_action(&custom);
-        let toggle = gio::SimpleAction::new("toggle-tag", Some(glib::VariantTy::STRING));
-        let w = self.weak();
-        toggle.connect_activate(move |_, v| {
-            let (Some(win), Some(id)) = (w.upgrade(), v.and_then(|v| v.get::<String>())) else { return };
-            let paths = win.pane().selected_paths();
-            if paths.is_empty() {
-                return;
-            }
-            let mut failed = 0;
-            for p in &paths {
-                if crate::tags::toggle(p, &id).is_err() {
-                    failed += 1;
-                }
-            }
-            if failed > 0 {
-                win.toasts.add_toast(notify::Toast::new(&format!("Could not tag {failed} item(s) (filesystem without extended attributes?)")));
-            }
-            // Re-read (symlinks show their target's tags too) and redraw the dots.
-            win.pane().refresh_tags(None);
-        });
-        self.window.add_action(&toggle);
-        add("new-tag", |w| {
-            let weak = w.weak();
-            dialogs::prompt(w.window.upcast_ref(), "New Tag", "Tag name:", "", move |name| {
-                let Some(win) = weak.upgrade() else { return };
-                let w2 = win.weak();
-                let names: Vec<String> = crate::tags::PALETTE.iter().map(|(n, h)| format!("{n}  {h}")).collect();
-                dialogs::choose(win.window.upcast_ref(), "Tag Color", "Pick a color for the tag", names, move |i| {
-                    let Some(win) = w2.upgrade() else { return };
-                    let hex = crate::tags::PALETTE.get(i).map_or("#8E8E93", |(_, h)| h);
-                    match crate::tags::add_custom(&name, hex) {
-                        Ok(tag) => {
-                            for p in win.all_panes() {
-                                p.canvas.set_tags(crate::tags::color_map(), p.canvas.model().entries.iter().any(|e| !e.tags.is_empty()));
-                            }
-                            win.fill_places();
-                            let sel = win.pane().selected_paths();
-                            if !sel.is_empty() {
-                                for p in &sel {
-                                    let _ = crate::tags::toggle(p, &tag.id);
-                                }
-                                win.pane().refresh_tags(None);
-                            }
-                            win.toasts.add_toast(notify::Toast::new(&format!("Tag “{}” added", tag.name)));
-                        }
-                        Err(e) => win.toasts.add_toast(notify::Toast::new(&format!("New tag failed: {e}"))),
-                    }
-                });
-            });
-        });
-        add("remove-tag", |w| {
-            let customs: Vec<crate::tags::Tag> = crate::tags::defs().into_iter().filter(|t| crate::tags::is_custom(&t.id)).collect();
-            if customs.is_empty() {
-                w.toasts.add_toast(notify::Toast::new("No custom tags to remove"));
-                return;
-            }
-            let weak = w.weak();
-            let names = customs.iter().map(|t| t.name.clone()).collect();
-            dialogs::choose(w.window.upcast_ref(), "Remove Tag", "Custom tag to remove (kept xattrs show as gray dots until retagged)", names, move |i| {
-                let Some(win) = weak.upgrade() else { return };
-                if customs.get(i).is_some_and(|t| crate::tags::remove_custom(&t.id)) {
-                    win.toasts.add_toast(notify::Toast::new(&format!("Tag “{}” removed", customs[i].name)));
-                }
-                win.fill_places();
-                win.pane().refresh_tags(None);
-            });
-        });
         add("add-bookmark", |w| {
             let mut dirs: Vec<PathBuf> = w.pane().selected_paths().into_iter().filter(|p| p.is_dir()).collect();
             if dirs.is_empty() {
@@ -1191,7 +1124,6 @@ impl Win {
                     devices::mount_volume(win.window.upcast_ref(), vol, move |res| win_open(&weak, res, None));
                 }
                 Some(Place::Server(uri)) => win.connect_server(uri),
-                Some(Place::Tag(id)) => win.search_tag(&id),
                 Some(Place::Connect) => {
                     let weak = win.weak();
                     dialogs::prompt(win.window.upcast_ref(), "Connect to Server", "Address, e.g. smb://nas.local/share, sftp://user@host/path, ftp://host", "smb://", move |uri| {
@@ -1317,18 +1249,6 @@ impl Win {
         });
     }
 
-    /// Sidebar TAGS: recursive tag search from Home in the active view.
-    fn search_tag(self: &Rc<Self>, id: &str) {
-        let name = crate::tags::defs().into_iter().find(|t| t.id == id).map(|t| t.name).unwrap_or_else(|| id.to_string());
-        let pane = self.pane();
-        let home = glib::home_dir();
-        if pane.path() != home {
-            pane.navigate(home);
-        }
-        // `navigate` started a folder load; the tag search below supersedes it by generation.
-        pane.start_tag_search(&name);
-    }
-
     /// Rebuild the sidebar now from what is known, then refresh free space and trashes in the background.
     fn fill_places(self: &Rc<Self>) {
         self.render_places();
@@ -1437,17 +1357,6 @@ impl Win {
             add(themed("folder-symbolic"), &label, Place::Bookmark(path), None, None);
         }
 
-        title("TAGS");
-        for t in crate::tags::defs() {
-            let line = gtk::Box::builder().spacing(11).build();
-            let dot = gtk::Label::builder().label("●").css_classes(["dim-label"]).build();
-            dot.set_markup(&format!("<span foreground=\"{}\">●</span>", glib::markup_escape_text(&t.hex)));
-            line.append(&dot);
-            line.append(&gtk::Label::builder().label(&t.name).ellipsize(gtk::pango::EllipsizeMode::End).hexpand(true).xalign(0.0).build());
-            self.places.append(&line);
-            places.borrow_mut().push(Some(Place::Tag(t.id)));
-        }
-
         // One Trash row; other drives' non-empty trashes are in its ▾ menu.
         let monitor = gio::VolumeMonitor::get();
         let side = self.side.borrow().clone();
@@ -1540,8 +1449,6 @@ enum Place {
     Share(PathBuf, String),
     Volume(gio::Volume),
     Server(String),
-    /// A tag: click runs a recursive tag search from Home.
-    Tag(String),
     Connect,
 }
 
