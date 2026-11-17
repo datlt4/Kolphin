@@ -224,6 +224,7 @@ mod imp {
         pub(super) texts: RefCell<HashMap<u32, Text>>,
         pub text_width: Cell<f64>,
         pub line_h: Cell<f64>,
+        pub char_w: Cell<f64>,
         pub target: Cell<Option<f64>>,
         pub velocity: Cell<f64>,
         pub tick: RefCell<Option<gtk::TickCallbackId>>,
@@ -257,6 +258,7 @@ mod imp {
                 texts: Default::default(),
                 text_width: Default::default(),
                 line_h: Default::default(),
+                char_w: Default::default(),
                 target: Default::default(),
                 velocity: Default::default(),
                 tick: Default::default(),
@@ -497,6 +499,16 @@ impl Canvas {
         imp.line_h.get()
     }
 
+    /// Width of one wide char in the UI font: Compact columns scale with it.
+    fn char_width(&self) -> f64 {
+        let imp = self.imp();
+        if imp.char_w.get() == 0.0 {
+            let w = self.create_pango_layout(Some("MMMMMMMMMM")).pixel_size().0 as f64 / 10.0;
+            imp.char_w.set(w.max(4.0));
+        }
+        imp.char_w.get()
+    }
+
     fn geometry(&self) -> Geometry {
         let (w, h) = (self.width().max(1) as f64, self.height().max(1) as f64);
         let m = self.model();
@@ -512,7 +524,9 @@ impl Canvas {
             }
             ViewMode::Compact => {
                 let rows = (((h - 8.0 - hdr) / list_h) as usize).max(1);
-                let cell_w = 260.0 + (small - 22.0) * 2.0;
+                // Fit the longest visible name (like Dolphin): narrow folders pack more columns.
+                let want = LIST_ICON_X + small + m.max_name as f64 * self.char_width() + 24.0 + (small - 22.0) * 2.0;
+                let cell_w = want.max(200.0).min((w * 0.8).max(200.0));
                 Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: list_h, card_w: cell_w - 4.0, pad: 1.0, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
             ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: list_h, card_w: w - 4.0, pad: 1.0, icon: small, top: HEADER_H, hdr, secs: Vec::new(), total: 0.0 },

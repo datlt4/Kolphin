@@ -190,6 +190,8 @@ pub struct Model {
     /// Visible entries in display order (indices into `entries`).
     pub order: Vec<u32>,
     pub sections: Vec<Section>,
+    /// Longest visible name in chars: Compact mode sizes its columns to it.
+    pub max_name: usize,
     pub show_hidden: bool,
     pub selected: Vec<bool>,
     pub sort: SortBy,
@@ -286,6 +288,9 @@ impl Model {
         for &i in &self.order {
             self.selected[i as usize] = was[i as usize];
         }
+        // Longest visible name (chars): Compact columns fit to it.
+        let entries = &self.entries;
+        self.max_name = self.order.iter().map(|&i| entries[i as usize].name.to_string_lossy().chars().count()).max().unwrap_or(0);
     }
 
     /// Stable sort of name-ordered items: folders first, then by the chosen key.
@@ -552,6 +557,14 @@ mod tests {
     #[test]
     fn folders_first() {
         assert!(sort_key("zzz", true) < sort_key("aaa", false));
+        let mut m = model(&[("a", false, 1), ("much-longer-name", false, 1)]);
+        assert_eq!(m.max_name, "much-longer-name".len());
+        m.filter = "much".into();
+        m.rebuild_order();
+        assert_eq!(m.max_name, "much-longer-name".len());
+        m.filter = "zzz".into();
+        m.rebuild_order();
+        assert_eq!(m.max_name, 0);
     }
 
     #[test]
