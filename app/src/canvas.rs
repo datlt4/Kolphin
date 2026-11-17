@@ -189,6 +189,8 @@ struct Text {
     name: pango::Layout,
     /// Details columns: size, date, type.
     columns: Option<[pango::Layout; 3]>,
+    /// Compact second line: dimmed size · date (files) or date (folders).
+    sub: Option<pango::Layout>,
 }
 
 enum Thumb {
@@ -515,6 +517,8 @@ impl Canvas {
         let hdr = if m.group == GroupBy::None { 0.0 } else { GROUP_H };
         let small = self.imp().small.get();
         let list_h = (small + 8.0).max(26.0);
+        // Compact rows carry a second dimmed line (size · date), so they are taller.
+        let compact_h = list_h + self.line_height() + 4.0;
         let mut g = match self.mode() {
             ViewMode::Icons => {
                 let icon = self.imp().zoom.get();
@@ -523,11 +527,12 @@ impl Canvas {
                 Geometry { cols, rows: 0, horizontal: false, cell_w: w / cols as f64, cell_h, card_w: (w / cols as f64 - 8.0).min(icon + 56.0), pad: 4.0, icon, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
             ViewMode::Compact => {
-                let rows = (((h - 8.0 - hdr) / list_h) as usize).max(1);
-                // Fit the longest visible name (like Dolphin): narrow folders pack more columns.
-                let want = LIST_ICON_X + small + m.max_name as f64 * self.char_width() + 24.0 + (small - 22.0) * 2.0;
+                let rows = (((h - 8.0 - hdr) / compact_h) as usize).max(1);
+                // Fit the longest visible line (name or its "size · date" sub-line, like Dolphin).
+                const INFO_CHARS: usize = 22;
+                let want = LIST_ICON_X + small + m.max_name.max(INFO_CHARS) as f64 * self.char_width() + 24.0 + (small - 22.0) * 2.0;
                 let cell_w = want.max(200.0).min((w * 0.8).max(200.0));
-                Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: list_h, card_w: cell_w - 4.0, pad: 1.0, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
+                Geometry { cols: 0, rows, horizontal: true, cell_w, cell_h: compact_h, card_w: cell_w - 4.0, pad: 1.0, icon: small, top: 0.0, hdr, secs: Vec::new(), total: 0.0 }
             }
             ViewMode::Details => Geometry { cols: 1, rows: 0, horizontal: false, cell_w: w, cell_h: list_h, card_w: w - 4.0, pad: 1.0, icon: small, top: HEADER_H, hdr, secs: Vec::new(), total: 0.0 },
         };
@@ -663,12 +668,24 @@ impl Canvas {
                 kind.set_ellipsize(pango::EllipsizeMode::End);
                 [size, date, kind]
             });
+            let sub = (self.mode() == ViewMode::Compact).then(|| {
+                let date = (e.mtime != UNKNOWN_TIME)
+                    .then(|| glib::DateTime::from_unix_local(e.mtime).ok()?.format("%Y-%m-%d").ok())
+                    .flatten()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let info = if e.is_dir { date } else if e.size == UNKNOWN_SIZE { date } else { format!("{} · {date}", glib::format_size(e.size)) };
+                let sub = self.create_pango_layout(Some(&info));
+                sub.set_width((width.max(1.0) * pango::SCALE as f64) as i32);
+                sub.set_ellipsize(pango::EllipsizeMode::End);
+                sub
+            });
             drop(m);
             let mut texts = imp.texts.borrow_mut();
             if texts.len() > 5000 {
                 texts.clear();
             }
-            texts.insert(idx, Text { name, columns });
+            texts.insert(idx, Text { name, columns, sub });
         }
         Ref::map(imp.texts.borrow(), |t| &t[&idx])
     }
@@ -835,15 +852,25 @@ impl Canvas {
 
             let text = self.text_for(idx, &g, name_w);
             let th = text.name.pixel_size().1 as f64;
+            let lh = self.line_height();
             let (tx, ty) = match self.mode() {
                 ViewMode::Icons => (bx + 6.0, y + 10.0 + g.icon + 6.0),
-                ViewMode::Compact => (x + LIST_ICON_X + g.icon + 8.0, y + (g.cell_h - th) / 2.0),
+                // Two lines (name + dimmed size · date), vertically centered.
+                ViewMode::Compact => (x + LIST_ICON_X + g.icon + 8.0, y + (g.cell_h - th - lh) / 2.0),
                 ViewMode::Details => (name_x, y + (g.cell_h - th) / 2.0),
             };
             snap.save();
             snap.translate(&graphene::Point::new(tx as f32, ty as f32));
             snap.append_layout(&text.name, &fg);
             snap.restore();
+            if self.mode() == ViewMode::Compact {
+                if let Some(sub) = &text.sub {
+                    snap.save();
+                    snap.translate(&graphene::Point::new(tx as f32, (ty + th) as f32));
+                    snap.append_layout(sub, &muted);
+                    snap.restore();
+                }
+            }
             if let Some(cols) = &text.columns {
                 let dim = muted;
                 for (layout, cx) in cols.iter().zip([size_x, date_x + 12.0, type_x + 8.0]) {
