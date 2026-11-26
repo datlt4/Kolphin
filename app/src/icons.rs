@@ -26,10 +26,19 @@ fn mapping() -> &'static Mapping {
         let table = |key: &str| -> HashMap<String, String> {
             v[key].as_object().into_iter().flatten().filter_map(|(k, id)| Some((k.to_lowercase(), svg(id.as_str()?)))).collect()
         };
+        let (mut folder_names, mut file_names, mut extensions) = (table("folderNames"), table("fileNames"), table("fileExtensions"));
+        // Our own icons (assets/custom-icons).
+        for n in ["qt", "qml", "vizgard"] {
+            folder_names.insert(n.into(), if n == "vizgard" { "folder-vizgard" } else { "folder-qt" }.into());
+        }
+        for e in ["qml", "qmlproject", "qrc"] {
+            extensions.insert(e.into(), "qt".into());
+        }
+        file_names.insert("qmldir".into(), "qt".into());
         Mapping {
-            folder_names: table("folderNames"),
-            file_names: table("fileNames"),
-            extensions: table("fileExtensions"),
+            folder_names,
+            file_names,
+            extensions,
             folder: svg(v["folder"].as_str().unwrap_or("folder")),
             file: svg(v["file"].as_str().unwrap_or("file")),
         }
@@ -107,5 +116,8 @@ mod tests {
         assert_eq!(icon_name("unknown.zzzz", false), "file");
         assert_eq!(icon_name("src", true), "folder-src");
         assert_eq!(icon_name("random-dir", true), "folder");
+        assert_eq!(icon_name("Main.qml", false), "qt");
+        assert_eq!(icon_name("Vizgard", true), "folder-vizgard");
+        assert!(super::find("vizgard").is_some() && super::find("folder-qt").is_some());
     }
 }
