@@ -728,7 +728,7 @@ impl Pane {
                     pdf.append(Some("Merge into PDF… (in the order picked)"), Some("win.pdf-merge"));
                 }
                 if pdf.n_items() > 0 {
-                    menu.append_section(Some("PDF"), &pdf);
+                    menu.append_section(None, &pdf);
                 }
             }
             section(&[("Compress…", "win.compress"), ("Create Symlink", "win.make-symlink"), ("Create Hard Link", "win.make-hardlink"), ("Share via Kermius", "win.share")]);
