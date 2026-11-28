@@ -68,12 +68,22 @@ pub fn icon_name(name: &str, is_dir: bool) -> &'static str {
 
 /// The embedded icon called `name`, as a static string.
 pub fn find(name: &str) -> Option<&'static str> {
-    SVGS.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|i| SVGS[i].0)
+    SVGS.binary_search_by(|(n, ..)| (*n).cmp(name)).ok().map(|i| SVGS[i].0)
 }
 
 /// Every embedded icon name, sorted.
 pub fn all() -> impl Iterator<Item = &'static str> {
-    SVGS.iter().map(|(n, _)| *n)
+    SVGS.iter().map(|(n, ..)| *n)
+}
+
+/// Icon picker categories ("Files", "Folders", "Vehicles › Cars & 4 wheels", …).
+pub fn categories() -> &'static [&'static str] {
+    CATEGORIES
+}
+
+/// Index into `categories()` of icon `name`.
+pub fn category(name: &str) -> Option<usize> {
+    SVGS.binary_search_by(|(n, ..)| (*n).cmp(name)).ok().map(|i| SVGS[i].2)
 }
 
 thread_local! {
@@ -93,7 +103,7 @@ pub fn texture(icon: &'static str, px: u32) -> Option<gdk::Texture> {
 }
 
 fn render(icon: &str, px: u32) -> Option<gdk::Texture> {
-    let data = SVGS.binary_search_by(|(n, _)| (*n).cmp(icon)).ok().map(|i| SVGS[i].1)?;
+    let data = SVGS.binary_search_by(|(n, ..)| (*n).cmp(icon)).ok().map(|i| SVGS[i].1)?;
     let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
     let size = tree.size();
@@ -119,5 +129,19 @@ mod tests {
         assert_eq!(icon_name("Main.qml", false), "qt");
         assert_eq!(icon_name("Vizgard", true), "folder-vizgard");
         assert!(super::find("vizgard").is_some() && super::find("folder-qt").is_some());
+    }
+
+    #[test]
+    fn every_custom_icon_renders() {
+        for (name, data, cat) in super::SVGS.iter().filter(|i| i.2 >= 2) {
+            let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32).unwrap();
+            let scale = 32.0 / tree.size().width().max(tree.size().height());
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+            assert!(pixmap.pixels().iter().any(|p| p.alpha() > 0), "{name} is blank");
+            assert!(*cat < super::CATEGORIES.len());
+        }
+        assert!(super::CATEGORIES.iter().any(|c| *c == "Vehicles › Two wheels"));
+        assert_eq!(super::category("logo-toyota").map(|c| super::CATEGORIES[c]), Some("Brands › Cars"));
     }
 }

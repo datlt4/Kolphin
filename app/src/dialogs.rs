@@ -174,11 +174,19 @@ pub fn pick_icon(parent: &gtk::Window, f: impl Fn(&'static str) + 'static) {
     // The search field keeps Esc to itself.
     search.connect_stop_search(glib::clone!(#[weak] win, move |_| win.close()));
     let names = gtk::StringList::new(&icons::all().collect::<Vec<_>>());
-    let filter = gtk::CustomFilter::new(glib::clone!(#[weak] search, #[upgrade_or] true, move |o| {
-        o.downcast_ref::<gtk::StringObject>().is_some_and(|s| s.string().contains(&*search.text().to_lowercase()))
+    // Category 0 is "All"; the rest are icons::categories() shifted by one.
+    let cats: Vec<&str> = std::iter::once("All").chain(icons::categories().iter().copied()).collect();
+    let category = gtk::DropDown::from_strings(&cats);
+    category.set_enable_search(true);
+    let filter = gtk::CustomFilter::new(glib::clone!(#[weak] search, #[weak] category, #[upgrade_or] true, move |o| {
+        let Some(s) = o.downcast_ref::<gtk::StringObject>() else { return false };
+        let name = s.string();
+        let cat = category.selected() as usize;
+        (cat == 0 || icons::category(&name).map(|c| c + 1) == Some(cat)) && name.contains(&*search.text().to_lowercase())
     }));
     let model = gtk::FilterListModel::new(Some(names), Some(filter.clone()));
-    search.connect_search_changed(move |_| filter.changed(gtk::FilterChange::Different));
+    search.connect_search_changed(glib::clone!(#[strong] filter, move |_| filter.changed(gtk::FilterChange::Different)));
+    category.connect_selected_notify(move |_| filter.changed(gtk::FilterChange::Different));
 
     let scale = parent.scale_factor().max(1) as u32;
     let factory = gtk::SignalListItemFactory::new();
@@ -206,7 +214,11 @@ pub fn pick_icon(parent: &gtk::Window, f: impl Fn(&'static str) + 'static) {
         }
         win.close();
     }));
-    body.append(&search);
+    let top = gtk::Box::builder().spacing(8).build();
+    search.set_hexpand(true);
+    top.append(&search);
+    top.append(&category);
+    body.append(&top);
     body.append(&gtk::ScrolledWindow::builder().child(&grid).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build());
     win.present();
     search.grab_focus();
